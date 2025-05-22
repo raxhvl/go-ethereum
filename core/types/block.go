@@ -68,6 +68,17 @@ type ExecutionWitness struct {
 	VerkleProof *verkle.VerkleProof `json:"verkleProof"`
 }
 
+// SlotAccess tracks all accesses to a specific storage slot.
+type SlotAccess struct {
+    Slot     common.Hash      // Storage slot being accessed
+}
+
+// AccountAccess tracks all storage accesses for an account.
+type AccountAccess struct {
+    Address  common.Address   // Account address
+    Slots    []SlotAccess    // List of accessed storage slots
+}
+
 //go:generate go run github.com/fjl/gencodec -type Header -field-override headerMarshaling -out gen_header_json.go
 //go:generate go run ../../rlp/rlpgen -type Header -out gen_header_rlp.go
 
@@ -106,6 +117,9 @@ type Header struct {
 
 	// RequestsHash was added by EIP-7685 and is ignored in legacy headers.
 	RequestsHash *common.Hash `json:"requestsHash" rlp:"optional"`
+
+	// BlockAccessList introduced by EIP-7928 and is ignored in legacy headers.
+    BlockAccessList *[]AccountAccess `json:"blockAccessList" rlp:"optional"`
 }
 
 // field type overrides for gencodec
@@ -125,7 +139,9 @@ type headerMarshaling struct {
 // Hash returns the block hash of the header, which is simply the keccak256 hash of its
 // RLP encoding.
 func (h *Header) Hash() common.Hash {
-	return rlpHash(h)
+	headerCopy := CopyHeader(h)
+	headerCopy.BlockAccessList = nil
+	return rlpHash(headerCopy)
 }
 
 var headerSize = common.StorageSize(reflect.TypeOf(Header{}).Size())
@@ -379,6 +395,23 @@ func (b *Block) Transaction(hash common.Hash) *Transaction {
 // Header returns the block header (as a copy).
 func (b *Block) Header() *Header {
 	return CopyHeader(b.header)
+}
+
+// Injects block access list into the block header.
+func(b *Block) SetBlockAccessList() error {
+	// TODO(BAL): Replace with actual access list.
+	accesses := []AccountAccess{
+		{
+			Address: common.HexToAddress("01"),
+			Slots: []SlotAccess{
+				{Slot: common.HexToHash("01")},
+				{Slot: common.HexToHash("02")}, 
+				{Slot: common.HexToHash("03")},
+			},
+		},
+	}
+	b.header.BlockAccessList = &accesses
+	return nil
 }
 
 // Header value accessors. These do copy!

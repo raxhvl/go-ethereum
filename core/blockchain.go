@@ -1132,6 +1132,9 @@ func (bc *BlockChain) ExportN(w io.Writer, first uint64, last uint64) error {
 			return errors.New("export failed: chain reorg during export")
 		}
 		parentHash = block.Hash()
+
+		block.SetBlockAccessList()
+	
 		if err := block.EncodeRLP(w); err != nil {
 			return err
 		}
