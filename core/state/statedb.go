@@ -1445,3 +1445,30 @@ func (s *StateDB) Witness() *stateless.Witness {
 func (s *StateDB) AccessEvents() *AccessEvents {
 	return s.accessEvents
 }
+
+// GetBlockAccessList returns the block access list from the
+// state cache.
+func (s *StateDB) GetBlockAccessList() *[]types.AccountAccess {
+	var accesses []types.AccountAccess
+	
+	// Collect storage slot accesses for each accessed account
+	for account, state := range s.stateObjects {
+		// Get all storage slots accessed for this account
+		slots := make([]types.SlotAccess, 0)
+		for slot := range state.originStorage {
+			slots = append(slots, types.SlotAccess{
+				Slot: slot,
+			})
+		}
+
+		// Only add account if there were storage accesses
+		if len(slots) > 0 {
+			accesses = append(accesses, types.AccountAccess{
+				Address: account,
+				Slots:   slots,
+			})
+		}
+	}
+
+	return &accesses
+}

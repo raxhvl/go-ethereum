@@ -397,21 +397,8 @@ func (b *Block) Header() *Header {
 	return CopyHeader(b.header)
 }
 
-// Injects block access list into the block header.
-func(b *Block) SetBlockAccessList() error {
-	// TODO(BAL): Replace with actual access list.
-	accesses := []AccountAccess{
-		{
-			Address: common.HexToAddress("01"),
-			Slots: []SlotAccess{
-				{Slot: common.HexToHash("01")},
-				{Slot: common.HexToHash("02")}, 
-				{Slot: common.HexToHash("03")},
-			},
-		},
-	}
-	b.header.BlockAccessList = &accesses
-	return nil
+func(b *Block) SetBlockAccessList(accessList *[]AccountAccess) {
+	b.header.BlockAccessList = accessList
 }
 
 // Header value accessors. These do copy!
