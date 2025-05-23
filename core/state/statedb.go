@@ -1450,7 +1450,7 @@ func (s *StateDB) AccessEvents() *AccessEvents {
 // state cache.
 func (s *StateDB) GetBlockAccessList() *[]types.AccountAccess {
 	var accesses []types.AccountAccess
-	
+
 	// Collect storage slot accesses for each accessed account
 	for account, state := range s.stateObjects {
 		// Get all storage slots accessed for this account

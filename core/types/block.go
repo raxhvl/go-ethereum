@@ -70,13 +70,13 @@ type ExecutionWitness struct {
 
 // SlotAccess tracks all accesses to a specific storage slot.
 type SlotAccess struct {
-    Slot     common.Hash      // Storage slot being accessed
+	Slot common.Hash // Storage slot being accessed
 }
 
 // AccountAccess tracks all storage accesses for an account.
 type AccountAccess struct {
-    Address  common.Address   // Account address
-    Slots    []SlotAccess    // List of accessed storage slots
+	Address common.Address // Account address
+	Slots   []SlotAccess   // List of accessed storage slots
 }
 
 //go:generate go run github.com/fjl/gencodec -type Header -field-override headerMarshaling -out gen_header_json.go
@@ -119,7 +119,7 @@ type Header struct {
 	RequestsHash *common.Hash `json:"requestsHash" rlp:"optional"`
 
 	// BlockAccessList introduced by EIP-7928 and is ignored in legacy headers.
-    BlockAccessList *[]AccountAccess `json:"blockAccessList" rlp:"optional"`
+	BlockAccessList *[]AccountAccess `json:"blockAccessList" rlp:"optional"`
 }
 
 // field type overrides for gencodec
@@ -397,7 +397,7 @@ func (b *Block) Header() *Header {
 	return CopyHeader(b.header)
 }
 
-func(b *Block) SetBlockAccessList(accessList *[]AccountAccess) {
+func (b *Block) SetBlockAccessList(accessList *[]AccountAccess) {
 	b.header.BlockAccessList = accessList
 }
 

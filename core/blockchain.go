@@ -1135,20 +1135,20 @@ func (bc *BlockChain) ExportN(w io.Writer, first uint64, last uint64) error {
 
 		// Reprocess the block to warm up state cache.
 		parentBlock := bc.GetHeader(block.ParentHash(), block.NumberU64()-1)
-		statedb, err := state.New(parentBlock.Root, bc.statedb)	
+		statedb, err := state.New(parentBlock.Root, bc.statedb)
 		if err != nil {
 			return err
 		}
 
 		_, err = bc.processor.Process(block, statedb, bc.vmConfig)
 		if err != nil {
-		  return err
+			return err
 		}
 
 		// Store the access list in the block header.
 		accessList := statedb.GetBlockAccessList()
 		block.SetBlockAccessList(accessList)
-	
+
 		if err := block.EncodeRLP(w); err != nil {
 			return err
 		}
