@@ -46,9 +46,12 @@ func newStatePrefetcher(config *params.ChainConfig, chain *HeaderChain) *statePr
 	}
 }
 
-// Prefetch processes the state changes according to the Ethereum rules by running
-// the transaction messages using the statedb, but any changes are discarded. The
-// only goal is to warm the state caches.
+// Prefetch warms up the state caches by processing state accesses without
+// actually committing any changes. It first checks for a BlockAccessList
+// in the header - if present, it directly warms up those accounts and storages
+// in parallel. Otherwise, it falls back to executing transactions to discover
+// the state access patterns. All reads are performed in parallel to maximize
+// throughput.
 func (p *statePrefetcher) Prefetch(block *types.Block, statedb *state.StateDB, cfg vm.Config, interrupt *atomic.Bool) {
 	var (
 		fails   atomic.Int64
@@ -59,6 +62,61 @@ func (p *statePrefetcher) Prefetch(block *types.Block, statedb *state.StateDB, c
 	)
 	workers.SetLimit(runtime.NumCPU() / 2)
 
+	// If block has a BlockAccessList, use it directly for warming up the cache
+	if block.Header().BlockAccessList != nil {
+		// Process BlockAccessList accounts in parallel
+		for _, access := range *block.Header().BlockAccessList {
+			workers.Go(func() error {
+				// If block prefetch was interrupted, abort
+				if interrupt != nil && interrupt.Load() {
+					return nil
+				}
+
+				// Load account data
+				reader.Account(access.Address)
+
+				// Load all storage slots for this account
+				for _, slot := range access.Slots {
+					if interrupt != nil && interrupt.Load() {
+						return nil
+					}
+					reader.Storage(access.Address, slot.Slot)
+				}
+				return nil
+			})
+		}
+
+		// In parallel, warm up the transaction recipients and their code
+		for _, tx := range block.Transactions() {
+			workers.Go(func() error {
+				if interrupt != nil && interrupt.Load() {
+					return nil
+				}
+
+				// Preload the sender
+				sender, err := types.Sender(signer, tx)
+				if err == nil {
+					reader.Account(sender)
+				}
+
+				// Preload the recipient and its code if it exists
+				if tx.To() != nil {
+					account, _ := reader.Account(*tx.To())
+
+					// Preload the contract code if the destination has non-empty code
+					if account != nil && !bytes.Equal(account.CodeHash, types.EmptyCodeHash.Bytes()) {
+						reader.Code(*tx.To(), common.BytesToHash(account.CodeHash))
+					}
+				}
+				return nil
+			})
+		}
+
+		workers.Wait()
+		return
+	}
+
+	// Fall back to transaction execution based warmup if no BlockAccessList
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
 		stateCpy := statedb.Copy() // closure
