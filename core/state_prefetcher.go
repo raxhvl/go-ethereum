@@ -86,32 +86,6 @@ func (p *statePrefetcher) Prefetch(block *types.Block, statedb *state.StateDB, c
 			})
 		}
 
-		// In parallel, warm up the transaction recipients and their code
-		for _, tx := range block.Transactions() {
-			workers.Go(func() error {
-				if interrupt != nil && interrupt.Load() {
-					return nil
-				}
-
-				// Preload the sender
-				sender, err := types.Sender(signer, tx)
-				if err == nil {
-					reader.Account(sender)
-				}
-
-				// Preload the recipient and its code if it exists
-				if tx.To() != nil {
-					account, _ := reader.Account(*tx.To())
-
-					// Preload the contract code if the destination has non-empty code
-					if account != nil && !bytes.Equal(account.CodeHash, types.EmptyCodeHash.Bytes()) {
-						reader.Code(*tx.To(), common.BytesToHash(account.CodeHash))
-					}
-				}
-				return nil
-			})
-		}
-
 		workers.Wait()
 		return
 	}
