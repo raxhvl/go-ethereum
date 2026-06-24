@@ -766,6 +766,14 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 		// performing the resolution and warming.
 		if addr, ok := types.ParseDelegation(st.state.GetCode(*msg.To)); ok {
 			st.state.AddAddressToAccessList(addr)
+			// Resolving the delegation accesses the target account, which the
+			// EIP-7928 block access list must record even when the transaction
+			// later runs out of gas at the top-frame charge (the cold-access
+			// charge is levied for this access). Reading it here registers the
+			// access; AddAddressToAccessList alone does not.
+			if rules.IsAmsterdam {
+				st.state.GetCode(addr)
+			}
 		}
 		// EIP-2780: charge the transaction's top-level recipient costs. If the
 		// budget cannot cover the charge, the top frame halts out of gas.
