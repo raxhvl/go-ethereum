@@ -122,14 +122,22 @@ func IntrinsicGas(data []byte, accessList types.AccessList, authList []types.Set
 	if accessList != nil {
 		addresses := uint64(len(accessList))
 		storageKeys := uint64(accessList.StorageKeys())
-		if (math.MaxUint64-gas.RegularGas)/params.TxAccessListAddressGas < addresses {
+		// EIP-8038 ties the access-list base costs to the cold-access costs
+		// (TX_ACCESS_LIST_ADDRESS = COLD_ACCOUNT_ACCESS = 3000,
+		// TX_ACCESS_LIST_STORAGE_KEY = COLD_STORAGE_ACCESS = 3000) in Amsterdam.
+		addressGas, storageKeyGas := params.TxAccessListAddressGas, params.TxAccessListStorageKeyGas
+		if rules.IsAmsterdam {
+			addressGas = params.ColdAccountAccessAmsterdam
+			storageKeyGas = params.ColdStorageAccessAmsterdam
+		}
+		if (math.MaxUint64-gas.RegularGas)/addressGas < addresses {
 			return vm.GasCosts{}, ErrGasUintOverflow
 		}
-		gas.RegularGas += addresses * params.TxAccessListAddressGas
-		if (math.MaxUint64-gas.RegularGas)/params.TxAccessListStorageKeyGas < storageKeys {
+		gas.RegularGas += addresses * addressGas
+		if (math.MaxUint64-gas.RegularGas)/storageKeyGas < storageKeys {
 			return vm.GasCosts{}, ErrGasUintOverflow
 		}
-		gas.RegularGas += storageKeys * params.TxAccessListStorageKeyGas
+		gas.RegularGas += storageKeys * storageKeyGas
 
 		// EIP-7981: access list data is charged in addition to the base charge.
 		if rules.IsAmsterdam {
@@ -817,12 +825,6 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 		}
 	}
 
-	// EIP-7708: Emit the ETH-burn logs
-	if rules.IsAmsterdam {
-		for _, log := range st.evm.StateDB.LogsForBurnAccounts() {
-			st.evm.StateDB.AddLog(log)
-		}
-	}
 	return &ExecutionResult{
 		UsedGas:    gasUsed,
 		MaxUsedGas: peakUsed,
@@ -999,12 +1001,14 @@ func (st *stateTransition) validateAuthorization(auth *types.SetCodeAuthorizatio
 func (st *stateTransition) applyAuthorization(rules params.Rules, auth *types.SetCodeAuthorization) error {
 	authority, err := st.validateAuthorization(auth)
 	if err != nil {
-		// EIP-8037 (spec apply_authorization): an invalid authorization is
-		// skipped without any state-gas refund. The per-auth intrinsic state
-		// charge ((NEW_ACCOUNT + AUTH_BASE) * CPSB) was levied for every
-		// authorization in the list regardless of validity, and only a
-		// successfully-applied authorization that avoids creating new state
-		// earns a refund below. Invalid auths therefore pay in full.
+		if rules.IsAmsterdam {
+			// Spec set_delegation: an invalid authorization writes no state, so
+			// the full per-auth intrinsic charge is refilled — NEW_ACCOUNT +
+			// AUTH_BASE to the state reservoir and the worst-case ACCOUNT_WRITE
+			// to the regular refund counter.
+			st.gasRemaining.RefundState((params.AccountCreationSize + params.AuthorizationCreationSize) * st.evm.Context.CostPerStateByte)
+			st.state.AddRefund(params.AccountWriteAmsterdam)
+		}
 		return err
 	}
 	prevDelegation, curDelegated := types.ParseDelegation(st.state.GetCode(authority))

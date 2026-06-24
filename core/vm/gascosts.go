@@ -65,6 +65,7 @@ type GasBudget struct {
 	StateGas       uint64 // remaining state-gas reservoir (or leftover for caller to absorb)
 	UsedRegularGas uint64 // gross regular gas consumed in this frame
 	UsedStateGas   int64  // signed net state-gas consumed in this frame
+	SpilledStateGas uint64 // state gas that spilled from the reservoir into regular gas in this frame
 }
 
 // NewGasBudget initializes a fresh GasBudget for execution / forwarding,
@@ -117,6 +118,7 @@ func (g *GasBudget) Charge(cost GasCosts) (GasBudget, bool) {
 		spillover := cost.StateGas - g.StateGas
 		g.StateGas = 0
 		g.RegularGas -= spillover
+		g.SpilledStateGas += spillover
 	} else {
 		g.StateGas -= cost.StateGas
 	}
@@ -145,15 +147,34 @@ func (g *GasBudget) IsZero() bool {
 	return g.RegularGas == 0 && g.StateGas == 0
 }
 
-// RefundState applies an inline state-gas refund (e.g., SSTORE 0->A->0).
-// The reservoir is credited and the signed usage counter is decremented
-// in lockstep, preserving the per-frame invariant:
+// RefundState applies an inline state-gas refund directly to the reservoir
+// (e.g., a SetCode authorization on an already-existing leaf, or a top-level
+// transaction refund). The reservoir is credited and the signed usage counter
+// is decremented in lockstep, preserving the per-frame invariant:
 //
 //	StateGas + UsedStateGas == initialStateGas + spillover_so_far
 //
 // which the revert path relies on for the correct gross refund.
 func (g *GasBudget) RefundState(s uint64) {
 	g.StateGas += s
+	g.UsedStateGas -= int64(s)
+}
+
+// CreditStateRefund applies an inline state-gas refund in LIFO order, mirroring
+// the spec's credit_state_gas_refund. State-gas charges draw from the reservoir
+// first and from regular gas last, so a refill credits the pool charged last
+// first: regular gas up to the amount previously spilled, then the reservoir.
+// This restores the exact pools the original charge drew from, so a probe
+// sub-call that can only observe the reservoir sees a refund only when the
+// reservoir actually had headroom.
+//
+// Used for SSTORE 0->A->0 restorations and NEW_ACCOUNT refunds on failed
+// CALL/CREATE sub-calls (spec storage.py / system.py credit_state_gas_refund).
+func (g *GasBudget) CreditStateRefund(s uint64) {
+	fromRegular := min(s, g.SpilledStateGas)
+	g.RegularGas += fromRegular
+	g.SpilledStateGas -= fromRegular
+	g.StateGas += s - fromRegular
 	g.UsedStateGas -= int64(s)
 }
 
@@ -201,48 +222,44 @@ func (g GasBudget) ExitSuccess() GasBudget {
 	return g
 }
 
-// ExitRevert produces the leftover for a REVERT exit. Per EIP-8037, all state
-// gas charged by the reverted frame is refunded to the caller's reservoir:
-//
-//	leftover.StateGas = StateGas + UsedStateGas
-//
-// UsedStateGas is reset since the frame's state changes are discarded.
+// ExitRevert produces the leftover for a REVERT exit. It mirrors the spec's
+// refill_frame_state_gas: the frame's state gas is rolled back in LIFO order —
+// the spilled portion is credited back to regular gas and the remainder to the
+// reservoir — so the pools the charges drew from are restored. No gas is burned
+// on a revert.
 func (g GasBudget) ExitRevert() GasBudget {
-	reservoir := int64(g.StateGas) + g.UsedStateGas
+	reservoir := int64(g.StateGas) + g.UsedStateGas - int64(g.SpilledStateGas)
 	if reservoir < 0 {
-		// Reservoir should never be negative. By construction it equals
-		// the initial state-gas allocation plus any spillover to regular
-		// gas.
+		// Reservoir should never be negative. By construction it equals the
+		// initial state-gas allocation (spillover is returned to regular gas).
 		reservoir = 0
-		log.Warn("Negative reservoir at revert", "remaining", g.StateGas, "used", g.UsedStateGas)
+		log.Warn("Negative reservoir at revert", "remaining", g.StateGas, "used", g.UsedStateGas, "spilled", g.SpilledStateGas)
 	}
 	return GasBudget{
-		RegularGas:     g.RegularGas,
+		RegularGas:     g.RegularGas + g.SpilledStateGas,
 		StateGas:       uint64(reservoir),
 		UsedRegularGas: g.UsedRegularGas,
 		UsedStateGas:   0,
 	}
 }
 
-// ExitHalt produces the leftover for an exceptional halt.
-//
-// Per the updated EIP-8037, only the regular gas_left is burned (folded into
-// UsedRegularGas); the entire state-gas reservoir — including any portion that
-// spilled into the regular pool during execution — is refunded to the caller's
-// reservoir rather than reclassified as burned regular gas.
+// ExitHalt produces the leftover for an exceptional halt. It mirrors the spec's
+// refill_frame_state_gas followed by the gas_left burn: the frame's state gas
+// is rolled back LIFO (spilled portion to regular gas, remainder to the
+// reservoir), then ALL remaining regular gas — including the just-refilled
+// spilled portion — is burned. Only the non-spilled reservoir survives.
 func (g GasBudget) ExitHalt() GasBudget {
-	reservoir := int64(g.StateGas) + g.UsedStateGas
+	reservoir := int64(g.StateGas) + g.UsedStateGas - int64(g.SpilledStateGas)
 	if reservoir < 0 {
-		// Reservoir should never be negative. By construction it equals
-		// the initial state-gas allocation plus any spillover to regular
-		// gas.
+		// Reservoir should never be negative. By construction it equals the
+		// initial state-gas allocation (spillover is burned with regular gas).
 		reservoir = 0
-		log.Warn("Negative reservoir at halt", "remaining", g.StateGas, "used", g.UsedStateGas)
+		log.Warn("Negative reservoir at halt", "remaining", g.StateGas, "used", g.UsedStateGas, "spilled", g.SpilledStateGas)
 	}
 	return GasBudget{
 		RegularGas:     0,
 		StateGas:       uint64(reservoir),
-		UsedRegularGas: g.UsedRegularGas + g.RegularGas,
+		UsedRegularGas: g.UsedRegularGas + g.RegularGas + g.SpilledStateGas,
 		UsedStateGas:   0,
 	}
 }

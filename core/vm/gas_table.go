@@ -698,9 +698,10 @@ func gasSStore8037(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memo
 		cost.StateGas = stateSetGas
 	}
 	if current != newValue && original == newValue && original == (common.Hash{}) {
-		// Slot set then cleared in the same tx: refund the state gas directly
-		// to the reservoir (not the gas_used/5-capped refund counter).
-		contract.Gas.RefundState(stateSetGas)
+		// Slot set then cleared in the same tx: refund the state gas in LIFO
+		// order (regular gas up to the spilled amount, then the reservoir),
+		// not the gas_used/5-capped refund counter.
+		contract.Gas.CreditStateRefund(stateSetGas)
 	}
 	return cost, nil
 }

@@ -681,9 +681,9 @@ func opCreate(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 
 	// EIP-8037: no account was created on any failure path, so refund the
 	// account-creation state gas charged before the opcode ran (gasCreateEip8037)
-	// back to the reservoir.
+	// in LIFO order (regular gas up to the spilled amount, then the reservoir).
 	if evm.chainRules.IsAmsterdam && suberr != nil {
-		scope.Contract.Gas.RefundState(params.AccountCreationSize * evm.Context.CostPerStateByte)
+		scope.Contract.Gas.CreditStateRefund(params.AccountCreationSize * evm.Context.CostPerStateByte)
 	}
 
 	if suberr == ErrExecutionReverted {
@@ -722,9 +722,9 @@ func opCreate2(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 
 	// EIP-8037: no account was created on any failure path, so refund the
 	// account-creation state gas charged before the opcode ran (gasCreate2Eip8037)
-	// back to the reservoir.
+	// in LIFO order (regular gas up to the spilled amount, then the reservoir).
 	if evm.chainRules.IsAmsterdam && suberr != nil {
-		scope.Contract.Gas.RefundState(params.AccountCreationSize * evm.Context.CostPerStateByte)
+		scope.Contract.Gas.CreditStateRefund(params.AccountCreationSize * evm.Context.CostPerStateByte)
 	}
 
 	if suberr == ErrExecutionReverted {
@@ -955,12 +955,11 @@ func opSelfdestruct6780(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, erro
 		evm.StateDB.SubBalance(this, balance, tracing.BalanceDecreaseSelfdestruct)
 		evm.StateDB.AddBalance(beneficiary, balance, tracing.BalanceIncreaseSelfdestruct)
 	}
-	if evm.chainRules.IsAmsterdam && !balance.IsZero() {
-		if this != beneficiary {
-			evm.StateDB.AddLog(types.EthTransferLog(this, beneficiary, balance))
-		} else if newContract {
-			evm.StateDB.AddLog(types.EthBurnLog(this, balance))
-		}
+	// EIP-7708: emit a transfer log when value moves to a distinct beneficiary.
+	// The current spec emits no burn log for a self-beneficiary selfdestruct
+	// (the balance is preserved and silently cleared at tx end).
+	if evm.chainRules.IsAmsterdam && !balance.IsZero() && this != beneficiary {
+		evm.StateDB.AddLog(types.EthTransferLog(this, beneficiary, balance))
 	}
 
 	if tracer := evm.Config.Tracer; tracer != nil {
