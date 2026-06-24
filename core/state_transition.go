@@ -746,13 +746,16 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 		if addr, ok := types.ParseDelegation(st.state.GetCode(*msg.To)); ok {
 			st.state.AddAddressToAccessList(addr)
 		}
-		// EIP-2780: charge the transaction's top-level recipient costs.
+		// EIP-2780: charge the transaction's top-level recipient costs. If the
+		// budget cannot cover the charge, the top frame halts out of gas.
 		if rules.IsAmsterdam && !st.chargeCallRecipientEIP2780(value) {
-			return nil, fmt.Errorf("%w: address %v", ErrEIP2780CallRecipientCharge, msg.To.Hex())
+			vmerr = vm.ErrOutOfGas
+			st.gasRemaining = st.gasRemaining.ExitHalt()
+		} else {
+			// Execute the transaction's call.
+			ret, result, vmerr = st.evm.Call(msg.From, st.to(), msg.Data, st.gasRemaining.ForwardAll(), value)
+			st.gasRemaining.Absorb(result)
 		}
-		// Execute the transaction's call.
-		ret, result, vmerr = st.evm.Call(msg.From, st.to(), msg.Data, st.gasRemaining.ForwardAll(), value)
-		st.gasRemaining.Absorb(result)
 	}
 
 	// EIP-8037 (fork.py:1086): on any transaction error, the state gas
