@@ -61,10 +61,10 @@ func (g GasCosts) String() string {
 //   - At absorption: the caller's Absorb method merges the child's leftover
 //     budget into its own running budget.
 type GasBudget struct {
-	RegularGas     uint64 // remaining regular-gas balance (or leftover for caller to absorb)
-	StateGas       uint64 // remaining state-gas reservoir (or leftover for caller to absorb)
-	UsedRegularGas uint64 // gross regular gas consumed in this frame
-	UsedStateGas   int64  // signed net state-gas consumed in this frame
+	RegularGas      uint64 // remaining regular-gas balance (or leftover for caller to absorb)
+	StateGas        uint64 // remaining state-gas reservoir (or leftover for caller to absorb)
+	UsedRegularGas  uint64 // gross regular gas consumed in this frame
+	UsedStateGas    int64  // signed net state-gas consumed in this frame
 	SpilledStateGas uint64 // state gas that spilled from the reservoir into regular gas in this frame
 }
 
@@ -261,26 +261,6 @@ func (g GasBudget) ExitHalt() GasBudget {
 		StateGas:       uint64(reservoir),
 		UsedRegularGas: g.UsedRegularGas + g.RegularGas + g.SpilledStateGas,
 		UsedStateGas:   0,
-	}
-}
-
-// ExitCodeDepositHalt produces the leftover for a CREATE/CREATE2 frame whose
-// initcode body ran to completion but then failed during the code-deposit step
-// (oversized code, 0xEF prefix, or insufficient gas for the hash/deposit
-// charge). Per the spec's process_create_message exception handler, this path
-// differs from a mid-execution ExceptionalHalt: only the remaining regular gas
-// is burned, while the state gas the (successful) body consumed is KEPT in
-// UsedStateGas rather than refunded to the reservoir. The state changes are
-// reverted by the caller, but the state-gas accounting is propagated upward so
-// the top-level tx settlement can discard it as the state dimension (rather
-// than folding it back into the combined balance, which would wrongly deflate
-// the regular dimension).
-func (g GasBudget) ExitCodeDepositHalt() GasBudget {
-	return GasBudget{
-		RegularGas:     0,
-		StateGas:       g.StateGas,
-		UsedRegularGas: g.UsedRegularGas + g.RegularGas,
-		UsedStateGas:   g.UsedStateGas,
 	}
 }
 

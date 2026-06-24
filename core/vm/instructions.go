@@ -741,6 +741,8 @@ func opCall(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	// We can use this as a temporary value
 	temp := stack.pop()
 	gas := evm.callGasTemp
+	// Capture before the sub-call: nested CALLs would overwrite the flag.
+	newAccountCharged := evm.callNewAccountChargedTemp
 	// Pop other call parameters.
 	addr, value, inOffset, inSize, retOffset, retSize := stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop()
 	toAddr := common.Address(addr.Bytes20())
@@ -771,6 +773,13 @@ func opCall(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 		scope.Memory.Set(retOffset.Uint64(), retSize.Uint64(), ret)
 	}
 	scope.Contract.refundGas(result, evm.Config.Tracer, tracing.GasChangeCallLeftOverRefunded)
+
+	// EIP-8037: when a value-bearing CALL to an empty account fails, no account
+	// is created, so refund the NEW_ACCOUNT state gas in LIFO order (spec
+	// generic_call credit_state_gas_refund on child error).
+	if evm.chainRules.IsAmsterdam && err != nil && newAccountCharged {
+		scope.Contract.Gas.CreditStateRefund(params.AccountCreationSize * evm.Context.CostPerStateByte)
+	}
 
 	evm.returnData = ret
 	return ret, nil
@@ -941,12 +950,18 @@ func opSelfdestruct6780(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, erro
 		beneficiary = common.Address(top.Bytes20())
 		newContract = evm.StateDB.IsNewContract(this)
 	)
-	// Contract is new and will actually be deleted.
+	// Contract is new and is eligible for deletion (EIP-6780).
 	if newContract {
-		if this != beneficiary { // Skip no-op transfer when self-destructing to self.
+		if this != beneficiary {
+			// Transfer the balance to a distinct beneficiary.
 			evm.StateDB.AddBalance(beneficiary, balance, tracing.BalanceIncreaseSelfdestruct)
+			evm.StateDB.SubBalance(this, balance, tracing.BalanceDecreaseSelfdestruct)
+		} else if !evm.chainRules.IsAmsterdam {
+			// Pre-EIP-8246: self-destructing to self burns the balance.
+			// EIP-8246 (Amsterdam) preserves it instead; the account is cleared
+			// preserving balance at the transaction boundary (StateDB.Finalise).
+			evm.StateDB.SubBalance(this, balance, tracing.BalanceDecreaseSelfdestruct)
 		}
-		evm.StateDB.SubBalance(this, balance, tracing.BalanceDecreaseSelfdestruct)
 		evm.StateDB.SelfDestruct(this)
 	}
 

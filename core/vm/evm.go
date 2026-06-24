@@ -121,6 +121,12 @@ type EVM struct {
 	// applied in opCall*.
 	callGasTemp uint64
 
+	// callNewAccountChargedTemp records whether the current CALL charged the
+	// EIP-8037 NEW_ACCOUNT state gas (value transfer to an empty account). It is
+	// set in gasCallIntrinsic and read in opCall to refund that charge in LIFO
+	// order when the sub-call fails (spec generic_call credit_state_gas_refund).
+	callNewAccountChargedTemp bool
+
 	// precompiles holds the precompiled contracts for the current epoch
 	precompiles map[common.Address]PrecompiledContract
 
@@ -587,8 +593,7 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 	contract.SetCallCode(common.Hash{}, code)
 	contract.IsDeployment = true
 
-	var depositHalt bool
-	ret, depositHalt, err = evm.initNewContract(contract, address)
+	ret, _, err = evm.initNewContract(contract, address)
 
 	// Special case: ErrCodeStoreOutOfGas pre-Homestead does NOT roll back
 	// state and gas is preserved (i.e., treated as success).
@@ -596,14 +601,10 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 		evm.StateDB.RevertToSnapshot(snapshot)
 
 		// EIP-8037: a code-deposit halt (initcode body succeeded, deposit step
-		// failed) keeps the state gas the body consumed for discard at the tx
-		// level, rather than refunding the reservoir like a mid-execution halt.
-		var exit GasBudget
-		if depositHalt && evm.chainRules.IsAmsterdam {
-			exit = contract.Gas.ExitCodeDepositHalt()
-		} else {
-			exit = contract.Gas.Exit(err)
-		}
+		// failed) is metered as an ordinary exceptional halt — the spec's
+		// process_create_message exception handler runs refill_frame_state_gas
+		// then burns the remaining regular gas, exactly like ExitHalt.
+		exit := contract.Gas.Exit(err)
 		if err != ErrExecutionReverted {
 			if evm.Config.Tracer.HasGasHook() {
 				evm.Config.Tracer.EmitGasChange(contract.Gas.AsTracing(), exit.AsTracing(), tracing.GasChangeCallFailedExecution)

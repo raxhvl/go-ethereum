@@ -829,6 +829,14 @@ func (s *StateDB) Finalise(deleteEmptyObjects bool) *bal.ConstructionBlockAccess
 			// finalise or delete, so ignore it here.
 			continue
 		}
+		// EIP-8246 (Amsterdam, gated by BAL being enabled): a self-destructed
+		// same-transaction account that still holds balance is not deleted.
+		// Instead its nonce, code, and storage are cleared while the balance is
+		// preserved, so it survives as a balance-only account. The cleared
+		// object then falls through to the ordinary update path below.
+		if obj.selfDestructed && s.stateAccessList != nil && !obj.Balance().IsZero() {
+			obj.clearPreservingBalance()
+		}
 		if obj.selfDestructed || (deleteEmptyObjects && obj.empty()) {
 			delete(s.stateObjects, obj.address)
 			s.markDelete(addr)

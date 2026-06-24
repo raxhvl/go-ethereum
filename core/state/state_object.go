@@ -122,6 +122,28 @@ func (s *stateObject) markSelfdestructed() {
 	s.selfDestructed = true
 }
 
+// clearPreservingBalance resets the account's nonce, code, and storage while
+// keeping its balance, mirroring the spec's clear_account_preserving_balance
+// (EIP-8246: SELFDESTRUCT no longer burns the balance). It also revokes the
+// self-destruct and new-contract flags so the cleared account is finalised as
+// an ordinary balance-only account rather than being deleted. Only valid for
+// EIP-6780-eligible (same-transaction) accounts, whose pre-transaction nonce,
+// code, and storage are empty, so discarding the in-transaction writes leaves
+// the persistent trie untouched.
+func (s *stateObject) clearPreservingBalance() {
+	s.data.Nonce = 0
+	s.data.CodeHash = types.EmptyCodeHash.Bytes()
+	s.data.Root = types.EmptyRootHash
+	s.code = nil
+	s.dirtyCode = false
+	s.originStorage = make(Storage)
+	s.dirtyStorage = make(Storage)
+	s.pendingStorage = make(Storage)
+	s.uncommittedStorage = make(Storage)
+	s.selfDestructed = false
+	s.newContract = false
+}
+
 func (s *stateObject) touch() {
 	s.db.journal.touchChange(s.address)
 }

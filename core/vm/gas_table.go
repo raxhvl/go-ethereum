@@ -514,6 +514,7 @@ func gasCallIntrinsic(evm *EVM, contract *Contract, stack *Stack, mem *Memory, m
 		// reservoir, spilling into regular gas only when the reservoir is
 		// exhausted, mirroring the spec's inline charge_state_gas in
 		// system.call.
+		evm.callNewAccountChargedTemp = false
 		if transfersValue && evm.StateDB.Empty(address) {
 			stateGas := params.AccountCreationSize * evm.Context.CostPerStateByte
 			regularAfterCall := contract.Gas.RegularGas - gas
@@ -523,6 +524,7 @@ func gasCallIntrinsic(evm *EVM, contract *Contract, stack *Stack, mem *Memory, m
 			if !contract.chargeState(stateGas, evm.Config.Tracer, tracing.GasChangeAccountCreation) {
 				return 0, ErrOutOfGas
 			}
+			evm.callNewAccountChargedTemp = true
 		}
 		return gas, nil
 	}
