@@ -854,7 +854,10 @@ func (st *stateTransition) chargeCallRecipientEIP2780(value *uint256.Int) bool {
 		cost vm.GasCosts
 		to   = *st.msg.To
 	)
-	if !value.IsZero() && st.state.Empty(to) {
+	// EIP-8037: a value transfer to an empty recipient charges NEW_ACCOUNT
+	// state gas — except for precompiles, which are protocol-inherent and not
+	// "created" by the transfer, so the charge is suppressed for them.
+	if !value.IsZero() && st.state.Empty(to) && !st.evm.IsPrecompile(to) {
 		cost.StateGas += params.AccountCreationSize * st.evm.Context.CostPerStateByte
 	}
 	if _, ok := types.ParseDelegation(st.state.GetCode(to)); ok {
