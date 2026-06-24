@@ -663,6 +663,9 @@ func opCreate(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 
 	child := scope.Contract.forwardGas(forward, evm.Config.Tracer, tracing.GasChangeCallContractCreation)
 	res, addr, result, suberr := evm.Create(scope.Contract.Address(), input, child, &value)
+	// EIP-8037: a successful create to an already-alive target leaf creates no
+	// new account; create() records that in createTargetAliveTemp.
+	targetWasAlive := evm.chainRules.IsAmsterdam && suberr == nil && evm.createTargetAliveTemp
 	// Push item on the stack based on the returned error. If the ruleset is
 	// homestead we must check for CodeStoreOutOfGasError (homestead only
 	// rule) and treat as an error, if the ruleset is frontier we must
@@ -679,10 +682,10 @@ func opCreate(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	// Refund the leftover gas back to current frame
 	scope.Contract.refundGas(result, evm.Config.Tracer, tracing.GasChangeCallLeftOverRefunded)
 
-	// EIP-8037: no account was created on any failure path, so refund the
-	// account-creation state gas charged before the opcode ran (gasCreateEip8037)
-	// in LIFO order (regular gas up to the spilled amount, then the reservoir).
-	if evm.chainRules.IsAmsterdam && suberr != nil {
+	// EIP-8037: refund the account-creation state gas charged before the opcode
+	// ran (gasCreateEip8037) in LIFO order when no new account leaf is created:
+	// any failure path, or a success where the target leaf already existed.
+	if evm.chainRules.IsAmsterdam && (suberr != nil || targetWasAlive) {
 		scope.Contract.Gas.CreditStateRefund(params.AccountCreationSize * evm.Context.CostPerStateByte)
 	}
 
@@ -707,8 +710,12 @@ func opCreate2(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 
 	// reuse size int for stackvalue
 	stackvalue := size
+
 	child := scope.Contract.forwardGas(forward, evm.Config.Tracer, tracing.GasChangeCallContractCreation2)
 	res, addr, result, suberr := evm.Create2(scope.Contract.Address(), input, child, &endowment, &salt)
+	// EIP-8037: a successful create to an already-alive target leaf creates no
+	// new account; create() records that in createTargetAliveTemp.
+	targetWasAlive := evm.chainRules.IsAmsterdam && suberr == nil && evm.createTargetAliveTemp
 	// Push item on the stack based on the returned error.
 	if suberr != nil {
 		stackvalue.Clear()
@@ -720,10 +727,10 @@ func opCreate2(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	// Refund the leftover gas back to current frame
 	scope.Contract.refundGas(result, evm.Config.Tracer, tracing.GasChangeCallLeftOverRefunded)
 
-	// EIP-8037: no account was created on any failure path, so refund the
-	// account-creation state gas charged before the opcode ran (gasCreate2Eip8037)
-	// in LIFO order (regular gas up to the spilled amount, then the reservoir).
-	if evm.chainRules.IsAmsterdam && suberr != nil {
+	// EIP-8037: refund the account-creation state gas charged before the opcode
+	// ran (gasCreate2Eip8037) in LIFO order when no new account leaf is created:
+	// any failure path, or a success where the target leaf already existed.
+	if evm.chainRules.IsAmsterdam && (suberr != nil || targetWasAlive) {
 		scope.Contract.Gas.CreditStateRefund(params.AccountCreationSize * evm.Context.CostPerStateByte)
 	}
 

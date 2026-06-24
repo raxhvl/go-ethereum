@@ -293,4 +293,9 @@ func (g *GasBudget) Absorb(child GasBudget) {
 	g.UsedRegularGas += child.UsedRegularGas
 	g.StateGas = child.StateGas
 	g.UsedStateGas += child.UsedStateGas
+	// A successful child propagates its spilled state gas to the parent so a
+	// later parent halt burns it (spec incorporate_child_on_success). On revert
+	// or halt the child's leftover SpilledStateGas is already zero (the exit
+	// form refilled it), so this is a no-op there.
+	g.SpilledStateGas += child.SpilledStateGas
 }

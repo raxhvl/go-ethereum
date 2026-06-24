@@ -127,6 +127,13 @@ type EVM struct {
 	// order when the sub-call fails (spec generic_call credit_state_gas_refund).
 	callNewAccountChargedTemp bool
 
+	// createTargetAliveTemp records, for the most recent successful create()
+	// frame, whether the target account leaf was already alive (non-empty)
+	// before the create. opCreate/opCreate2 read it to refund the EIP-8037
+	// NEW_ACCOUNT state gas on a successful create to a pre-existing leaf
+	// (spec create_message: refund when target_alive).
+	createTargetAliveTemp bool
+
 	// precompiles holds the precompiled contracts for the current epoch
 	precompiles map[common.Address]PrecompiledContract
 
@@ -491,6 +498,13 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 	return ret, exitGas, err
 }
 
+// CreateTargetWasAlive reports whether the most recent successful create()
+// frame targeted an already-alive (non-empty) account leaf. Used by the
+// transaction-level creation path to apply the EIP-8037 NEW_ACCOUNT refund.
+func (evm *EVM) CreateTargetWasAlive() bool {
+	return evm.createTargetAliveTemp
+}
+
 // create creates a new contract using code as deployment code.
 func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value *uint256.Int, address common.Address, typ OpCode) (ret []byte, createAddress common.Address, result GasBudget, err error) {
 	// Depth check execution. Fail if we're trying to execute above the
@@ -552,6 +566,15 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 		// address collision while regular gas is burnt.
 		return nil, common.Address{}, halt, ErrContractAddressCollision
 	}
+	// EIP-8037: record whether the target leaf was already alive (non-empty)
+	// before the create. The collision check above already accessed the
+	// account, so this read adds nothing new to the block access list. A
+	// successful create to an already-alive leaf creates no new account, so
+	// opCreate/opCreate2 refunds the NEW_ACCOUNT charge. Captured here (rather
+	// than eagerly in the opcode) so early-failure paths that never reach the
+	// target — depth, insufficient balance — do not record a spurious access.
+	targetAlive := !evm.StateDB.Empty(address)
+
 	// Create a new account on the state only if the object was not present.
 	// It might be possible the contract code is deployed to a pre-existent
 	// account with non-zero balance.
@@ -613,7 +636,10 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 		return ret, address, exit, err
 	}
 	// Either success, or pre-Homestead ErrCodeStoreOutOfGas (gas preserved).
-	// Both packaged as a success-form GasBudget.
+	// Both packaged as a success-form GasBudget. Record target aliveness for
+	// the EIP-8037 NEW_ACCOUNT refund (set here, after any nested creates ran,
+	// so it reflects this frame's target rather than a deeper one).
+	evm.createTargetAliveTemp = targetAlive
 	return ret, address, contract.Gas.ExitSuccess(), err
 }
 

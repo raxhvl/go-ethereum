@@ -745,6 +745,13 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 		// Execute the transaction's creation.
 		ret, _, result, vmerr = st.evm.Create(msg.From, msg.Data, st.gasRemaining.ForwardAll(), value)
 		st.gasRemaining.Absorb(result)
+		// EIP-8037: a successful creation to a pre-existing (alive) leaf creates
+		// no new account, so refund the intrinsic NEW_ACCOUNT state gas to the
+		// reservoir (fork.py: refunded when created_target_alive). The failure
+		// case is handled by the vmerr branch below.
+		if rules.IsAmsterdam && vmerr == nil && st.evm.CreateTargetWasAlive() {
+			st.gasRemaining.RefundState(params.AccountCreationSize * st.evm.Context.CostPerStateByte)
+		}
 	} else {
 		// Increment the nonce for the next transaction.
 		st.state.SetNonce(msg.From, st.state.GetNonce(msg.From)+1, tracing.NonceChangeEoACall)
@@ -930,13 +937,13 @@ func (st *stateTransition) settleGas(rules params.Rules, floorDataGas uint64) (g
 	}
 
 	if rules.IsAmsterdam {
-		// EIP-7623/7976: the calldata floor applies to the block-level regular
-		// gas dimension as well, mirroring its effect on the receipt gas. The
-		// spec accumulates max(tx_regular_gas, calldata_floor) into
-		// block_gas_used, so the block must never count fewer regular units
-		// than the floor the sender was charged.
-		blockRegularGas := max(txRegularGas, floorDataGas)
-		if err = st.gp.ChargeGasAmsterdam(blockRegularGas, txStateGas, gasUsed); err != nil {
+		// EIP-7778: the block-level gas accounting uses the gross regular gas
+		// (tx_gas_used_before_refund - tx_state_gas) and ignores both the
+		// EIP-3529 refund and the EIP-7623/7976 calldata floor. The floor and
+		// refund only affect the receipt scalar (tx_gas_used) and the sender's
+		// ETH refund, not what the block charges (fork.py: block_gas_used +=
+		// tx_regular_gas).
+		if err = st.gp.ChargeGasAmsterdam(txRegularGas, txStateGas, gasUsed); err != nil {
 			return 0, 0, err
 		}
 	} else {
@@ -998,7 +1005,7 @@ func (st *stateTransition) validateAuthorization(auth *types.SetCodeAuthorizatio
 //   - the delegation-indicator portion (AuthorizationCreationSize × CPSB) is
 //     refunded when this auth writes no new indicator bytes (the authority is
 //     already delegated, or the auth clears the delegation).
-func (st *stateTransition) applyAuthorization(rules params.Rules, auth *types.SetCodeAuthorization) error {
+func (st *stateTransition) applyAuthorization(rules params.Rules, auth *types.SetCodeAuthorization, preDelegated map[common.Address]bool) error {
 	authority, err := st.validateAuthorization(auth)
 	if err != nil {
 		if rules.IsAmsterdam {
@@ -1018,24 +1025,39 @@ func (st *stateTransition) applyAuthorization(rules params.Rules, auth *types.Se
 			st.state.AddRefund(params.CallNewAccountGas - params.TxAuthTupleGas)
 		}
 	} else {
-		// EIP-8037 (spec apply_authorization): refund the per-auth intrinsic
-		// state charge for state that does not actually get newly created.
+		// EIP-8037/8038 (spec set_delegation): refund the per-auth intrinsic
+		// state charge for state that is not actually newly created.
 		//
-		//   - NEW_ACCOUNT is refunded when the authority account already exists
-		//     (account_exists), since no new account is created.
+		// delegated_now reflects prior authorizations applied this tx; the
+		// pre-transaction delegation is captured on first touch of the
+		// authority.
+		delegatedNow := curDelegated
+		delegatedBeforeTx, seen := preDelegated[authority]
+		if !seen {
+			delegatedBeforeTx = curDelegated
+			preDelegated[authority] = delegatedBeforeTx
+		}
+		//   - NEW_ACCOUNT (+ worst-case ACCOUNT_WRITE regular) is refunded when
+		//     the authority account leaf already exists, since no new account
+		//     is created.
 		if st.state.Exist(authority) {
 			st.gasRemaining.RefundState(params.AccountCreationSize * st.evm.Context.CostPerStateByte)
-			// EIP-8038: the worst-case ACCOUNT_WRITE charged per authorization in
-			// the intrinsic cost is refunded to the regular refund counter when
-			// the authority account already exists (no new account is created).
 			st.state.AddRefund(params.AccountWriteAmsterdam)
 		}
-		//   - AUTH_BASE is refunded when no new delegation-indicator bytes are
-		//     written: either the authority already carries code/delegation
-		//     (code_hash != EMPTY, i.e. curDelegated) or this auth clears the
-		//     delegation (auth.address == 0). Exactly one refund per auth.
-		if curDelegated || auth.Address == (common.Address{}) {
-			st.gasRemaining.RefundState(params.AuthorizationCreationSize * st.evm.Context.CostPerStateByte)
+		//   - AUTH_BASE refill, mirroring set_delegation:
+		authBase := params.AuthorizationCreationSize * st.evm.Context.CostPerStateByte
+		if auth.Address == (common.Address{}) {
+			// Clearing: refund AUTH_BASE; refund a second time when removing a
+			// delegation that was created earlier in this same transaction
+			// (delegated now but not before the tx).
+			st.gasRemaining.RefundState(authBase)
+			if delegatedNow && !delegatedBeforeTx {
+				st.gasRemaining.RefundState(authBase)
+			}
+		} else if delegatedNow || delegatedBeforeTx {
+			// Setting: refund AUTH_BASE when no new indicator bytes are written
+			// (the authority already carries a delegation now or pre-tx).
+			st.gasRemaining.RefundState(authBase)
 		}
 	}
 
@@ -1058,8 +1080,14 @@ func (st *stateTransition) applyAuthorization(rules params.Rules, auth *types.Se
 
 // applyAuthorizations applies an EIP-7702 code delegation to the state.
 func (st *stateTransition) applyAuthorizations(rules params.Rules, auths []types.SetCodeAuthorization) {
+	// preDelegated records each authority's delegation state in the
+	// pre-transaction state, captured on the first authorization that touches
+	// it. EIP-8037 distinguishes a delegation that existed before the
+	// transaction (delegated_before_tx) from one created earlier in the same
+	// transaction (delegated_now) when refilling AUTH_BASE.
+	preDelegated := make(map[common.Address]bool)
 	for _, auth := range auths {
-		st.applyAuthorization(rules, &auth)
+		st.applyAuthorization(rules, &auth, preDelegated)
 	}
 }
 
