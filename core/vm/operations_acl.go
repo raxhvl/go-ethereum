@@ -106,7 +106,12 @@ func gasSLoadEIP2929(evm *EVM, contract *Contract, stack *Stack, mem *Memory, me
 		// If the caller cannot afford the cost, this change will be rolled back
 		// If he does afford it, we can skip checking the same thing later on, during execution
 		evm.StateDB.AddSlotToAccessList(contract.Address(), slot)
-		return GasCosts{RegularGas: params.ColdSloadCostEIP2929}, nil
+		coldCost := params.ColdSloadCostEIP2929
+		if evm.chainRules.IsAmsterdam {
+			// EIP-8038: cold storage access raised to 3000.
+			coldCost = params.ColdStorageAccessAmsterdam
+		}
+		return GasCosts{RegularGas: coldCost}, nil
 	}
 	return GasCosts{RegularGas: params.WarmStorageReadCostEIP2929}, nil
 }
@@ -125,16 +130,24 @@ func gasExtCodeCopyEIP2929(evm *EVM, contract *Contract, stack *Stack, mem *Memo
 	gas := gasCost.RegularGas
 	addr := common.Address(stack.peek().Bytes20())
 	// Check slot presence in the access list
+	coldCost := params.ColdAccountAccessCostEIP2929
+	// EIP-8038: in Amsterdam cold account access is 3000 and EXTCODECOPY also
+	// charges an extra warm-access "code reading" cost.
+	var codeReadingCost uint64
+	if evm.chainRules.IsAmsterdam {
+		coldCost = params.ColdAccountAccessAmsterdam
+		codeReadingCost = params.WarmStorageReadCostEIP2929
+	}
 	if !evm.StateDB.AddressInAccessList(addr) {
 		evm.StateDB.AddAddressToAccessList(addr)
 		var overflow bool
 		// We charge (cold-warm), since 'warm' is already charged as constantGas
-		if gas, overflow = math.SafeAdd(gas, params.ColdAccountAccessCostEIP2929-params.WarmStorageReadCostEIP2929); overflow {
+		if gas, overflow = math.SafeAdd(gas, coldCost-params.WarmStorageReadCostEIP2929); overflow {
 			return GasCosts{}, ErrGasUintOverflow
 		}
-		return GasCosts{RegularGas: gas}, nil
+		return GasCosts{RegularGas: gas + codeReadingCost}, nil
 	}
-	return GasCosts{RegularGas: gas}, nil
+	return GasCosts{RegularGas: gas + codeReadingCost}, nil
 }
 
 // gasEip2929AccountCheck checks whether the first stack item (as address) is present in the access list.
@@ -150,8 +163,13 @@ func gasEip2929AccountCheck(evm *EVM, contract *Contract, stack *Stack, mem *Mem
 	if !evm.StateDB.AddressInAccessList(addr) {
 		// If the caller cannot afford the cost, this change will be rolled back
 		evm.StateDB.AddAddressToAccessList(addr)
+		coldCost := params.ColdAccountAccessCostEIP2929
+		if evm.chainRules.IsAmsterdam {
+			// EIP-8038: cold account access raised to 3000.
+			coldCost = params.ColdAccountAccessAmsterdam
+		}
 		// The warm storage read cost is already charged as constantGas
-		return GasCosts{RegularGas: params.ColdAccountAccessCostEIP2929 - params.WarmStorageReadCostEIP2929}, nil
+		return GasCosts{RegularGas: coldCost - params.WarmStorageReadCostEIP2929}, nil
 	}
 	return GasCosts{}, nil
 }
@@ -282,7 +300,12 @@ func makeCallVariantGasCallEIP7702(intrinsicFunc intrinsicGasFunc) gasFunc {
 			eip2929Cost uint64
 			eip7702Cost uint64
 			addr        = common.Address(stack.back(1).Bytes20())
+			// EIP-8038: cold account access raised to 3000 in Amsterdam.
+			coldCost = params.ColdAccountAccessCostEIP2929
 		)
+		if evm.chainRules.IsAmsterdam {
+			coldCost = params.ColdAccountAccessAmsterdam
+		}
 		// Perform EIP-2929 checks (stateless), checking address presence
 		// in the accessList and charge the cold access accordingly.
 		if !evm.StateDB.AddressInAccessList(addr) {
@@ -291,7 +314,7 @@ func makeCallVariantGasCallEIP7702(intrinsicFunc intrinsicGasFunc) gasFunc {
 			// The WarmStorageReadCostEIP2929 (100) is already deducted in the form
 			// of a constant cost, so the cost to charge for cold access, if any,
 			// is Cold - Warm
-			eip2929Cost = params.ColdAccountAccessCostEIP2929 - params.WarmStorageReadCostEIP2929
+			eip2929Cost = coldCost - params.WarmStorageReadCostEIP2929
 
 			// Charge the remaining difference here already, to correctly calculate
 			// available gas for call
@@ -322,7 +345,7 @@ func makeCallVariantGasCallEIP7702(intrinsicFunc intrinsicGasFunc) gasFunc {
 				eip7702Cost = params.WarmStorageReadCostEIP2929
 			} else {
 				evm.StateDB.AddAddressToAccessList(target)
-				eip7702Cost = params.ColdAccountAccessCostEIP2929
+				eip7702Cost = coldCost
 			}
 			if !contract.chargeRegular(eip7702Cost, evm.Config.Tracer, tracing.GasChangeCallStorageColdAccess) {
 				return GasCosts{}, ErrOutOfGas

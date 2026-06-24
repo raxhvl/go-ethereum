@@ -492,6 +492,10 @@ func gasCallIntrinsic(evm *EVM, contract *Contract, stack *Stack, mem *Memory, m
 	var transferGas uint64
 	if transfersValue && !evm.chainRules.IsEIP4762 {
 		transferGas = params.CallValueTransferGas
+		if evm.chainRules.IsAmsterdam {
+			// EIP-8038: CALL_VALUE = ACCOUNT_WRITE + CALL_STIPEND.
+			transferGas = params.CallValueTransferAmsterdam
+		}
 	}
 	var overflow bool
 	if gas, overflow = math.SafeAdd(memoryGas, transferGas); overflow {
@@ -546,7 +550,12 @@ func gasCallCodeIntrinsic(evm *EVM, contract *Contract, stack *Stack, mem *Memor
 		overflow bool
 	)
 	if stack.back(2).Sign() != 0 && !evm.chainRules.IsEIP4762 {
-		gas += params.CallValueTransferGas
+		transferGas := params.CallValueTransferGas
+		if evm.chainRules.IsAmsterdam {
+			// EIP-8038: CALL_VALUE = ACCOUNT_WRITE + CALL_STIPEND.
+			transferGas = params.CallValueTransferAmsterdam
+		}
+		gas += transferGas
 	}
 	if gas, overflow = math.SafeAdd(gas, memoryGas); overflow {
 		return 0, ErrGasUintOverflow
@@ -606,7 +615,7 @@ func gasSelfdestruct8037(evm *EVM, contract *Contract, stack *Stack, mem *Memory
 	if !evm.StateDB.AddressInAccessList(address) {
 		// If the caller cannot afford the cost, this change will be rolled back
 		evm.StateDB.AddAddressToAccessList(address)
-		gas.RegularGas = params.ColdAccountAccessCostEIP2929
+		gas.RegularGas = params.ColdAccountAccessAmsterdam
 	}
 	// Check we have enough regular gas before we add the address to the BAL
 	if contract.Gas.RegularGas < gas.RegularGas {
@@ -620,78 +629,78 @@ func gasSelfdestruct8037(evm *EVM, contract *Contract, stack *Stack, mem *Memory
 	// Funding such an account makes it permanent state growth and must be charged.
 	if evm.StateDB.Empty(address) && evm.StateDB.GetBalance(contract.Address()).Sign() != 0 {
 		gas.StateGas += params.AccountCreationSize * evm.Context.CostPerStateByte
+		// EIP-8038: positive balance sent to an empty account also charges the
+		// regular ACCOUNT_WRITE cost.
+		gas.RegularGas += params.AccountWriteAmsterdam
 	}
 	return gas, nil
 }
 
+// gasSStore8037 is the SSTORE gas calculator for Amsterdam (EIP-8037 +
+// EIP-8038). It mirrors amsterdam/vm/instructions/storage.py::sstore:
+//
+//   - a cold/warm access cost is always charged (regular);
+//   - a STORAGE_WRITE cost is charged once, on the first change to the slot in
+//     the transaction (regular);
+//   - creating a slot from zero charges STORAGE_SET state gas, refunded to the
+//     reservoir if the slot is later restored to zero in the same tx;
+//   - clearing an originally non-zero slot credits/reverses REFUND_STORAGE_CLEAR
+//     and restoring a changed slot refunds the STORAGE_WRITE, both via the
+//     (gas_used/5-capped) refund counter.
 func gasSStore8037(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (GasCosts, error) {
 	if evm.readOnly {
 		return GasCosts{}, ErrWriteProtection
 	}
-	// If we fail the minimum gas availability invariant, fail (0)
-	if contract.Gas.RegularGas <= params.SstoreSentryGasEIP2200 {
+	// Stipend sentry: require strictly more than the call stipend (spec
+	// check_gas(CALL_STIPEND + 1)).
+	if contract.Gas.RegularGas <= params.CallStipend {
 		return GasCosts{}, errors.New("not enough gas for reentrancy sentry")
 	}
-	// Gas sentry honoured, do the actual gas calculation based on the stored value
 	var (
 		y, x              = stack.back(1), stack.peek()
 		slot              = common.Hash(x.Bytes32())
 		current, original = evm.StateDB.GetStateAndCommittedState(contract.Address(), slot)
+		newValue          = common.Hash(y.Bytes32())
+		stateSetGas       = params.StorageCreationSize * evm.Context.CostPerStateByte
 		cost              GasCosts
 	)
-	// Check slot presence in the access list
+	// Access cost: cold or warm, always charged.
 	if _, slotPresent := evm.StateDB.SlotInAccessList(contract.Address(), slot); !slotPresent {
-		cost = GasCosts{RegularGas: params.ColdSloadCostEIP2929}
-		// If the caller cannot afford the cost, this change will be rolled back
+		// If the caller cannot afford the cost, this change will be rolled back.
 		evm.StateDB.AddSlotToAccessList(contract.Address(), slot)
+		cost.RegularGas += params.ColdStorageAccessAmsterdam
+	} else {
+		cost.RegularGas += params.WarmStorageReadCostEIP2929
 	}
-	value := common.Hash(y.Bytes32())
-
-	if current == value { // noop (1)
-		// EIP 2200 original clause:
-		//		return params.SloadGasEIP2200, nil
-		return GasCosts{RegularGas: cost.RegularGas + params.WarmStorageReadCostEIP2929}, nil // SLOAD_GAS
+	// Write cost: charged on the first change to the slot this transaction.
+	if original == current && current != newValue {
+		cost.RegularGas += params.StorageWriteAmsterdam
 	}
-	if original == current {
-		if original == (common.Hash{}) { // create slot (2.1.1)
-			return GasCosts{
-				RegularGas: cost.RegularGas + params.SstoreResetGasEIP2200 - params.ColdSloadCostEIP2929,
-				StateGas:   params.StorageCreationSize * evm.Context.CostPerStateByte,
-			}, nil
+	// Refund counter (regular).
+	if current != newValue {
+		if original != (common.Hash{}) && current != (common.Hash{}) && newValue == (common.Hash{}) {
+			// Storage cleared for the first time in the transaction.
+			evm.StateDB.AddRefund(params.SstoreClearsRefundAmsterdam)
 		}
-		if value == (common.Hash{}) { // delete slot (2.1.2b)
-			evm.StateDB.AddRefund(params.SstoreClearsScheduleRefundEIP3529)
+		if original != (common.Hash{}) && current == (common.Hash{}) {
+			// A refund issued earlier this tx is reversed.
+			evm.StateDB.SubRefund(params.SstoreClearsRefundAmsterdam)
 		}
-		// EIP-2200 original clause:
-		//		return params.SstoreResetGasEIP2200, nil // write existing slot (2.1.2)
-		return GasCosts{RegularGas: cost.RegularGas + params.SstoreResetGasEIP2200 - params.ColdSloadCostEIP2929}, nil // write existing slot (2.1.2)
-	}
-	if original != (common.Hash{}) {
-		if current == (common.Hash{}) { // recreate slot (2.2.1.1)
-			evm.StateDB.SubRefund(params.SstoreClearsScheduleRefundEIP3529)
-		} else if value == (common.Hash{}) { // delete slot (2.2.1.2)
-			evm.StateDB.AddRefund(params.SstoreClearsScheduleRefundEIP3529)
+		if original == newValue {
+			// Slot restored to its original value: refund the STORAGE_WRITE
+			// charged on the first-time change earlier this transaction.
+			evm.StateDB.AddRefund(params.StorageWriteAmsterdam)
 		}
 	}
-	if original == value {
-		if original == (common.Hash{}) { // reset to original inexistent slot (2.2.2.1)
-			// EIP-8037 point (2): refund state gas directly to the reservoir
-			// at the SSTORE restoration point (0→x→0 in same tx); not to the
-			// refund counter, which is capped at gas_used/5.
-			contract.Gas.RefundState(params.StorageCreationSize * evm.Context.CostPerStateByte)
-
-			// Regular portion of the refund still goes through the refund counter.
-			evm.StateDB.AddRefund(params.SstoreResetGasEIP2200 - params.ColdSloadCostEIP2929 - params.WarmStorageReadCostEIP2929)
-		} else { // reset to original existing slot (2.2.2.2)
-			// EIP 2200 Original clause:
-			//	evm.StateDB.AddRefund(params.SstoreResetGasEIP2200 - params.SloadGasEIP2200)
-			// - SSTORE_RESET_GAS redefined as (5000 - COLD_SLOAD_COST)
-			// - SLOAD_GAS redefined as WARM_STORAGE_READ_COST
-			// Final: (5000 - COLD_SLOAD_COST) - WARM_STORAGE_READ_COST
-			evm.StateDB.AddRefund((params.SstoreResetGasEIP2200 - params.ColdSloadCostEIP2929) - params.WarmStorageReadCostEIP2929)
-		}
+	// State gas (reservoir).
+	if original == current && current != newValue && original == (common.Hash{}) {
+		// Slot created from zero: charge STORAGE_SET state gas.
+		cost.StateGas = stateSetGas
 	}
-	// EIP-2200 original clause:
-	//return params.SloadGasEIP2200, nil // dirty update (2.2)
-	return GasCosts{RegularGas: cost.RegularGas + params.WarmStorageReadCostEIP2929}, nil // dirty update (2.2)
+	if current != newValue && original == newValue && original == (common.Hash{}) {
+		// Slot set then cleared in the same tx: refund the state gas directly
+		// to the reservoir (not the gas_used/5-capped refund counter).
+		contract.Gas.RefundState(stateSetGas)
+	}
+	return cost, nil
 }

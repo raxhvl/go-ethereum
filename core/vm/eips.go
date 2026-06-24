@@ -600,4 +600,21 @@ func enable8037(jt *JumpTable) {
 	jt[CREATE2].dynamicGas = gasCreate2Eip8037
 	jt[SELFDESTRUCT].dynamicGas = gasSelfdestruct8037
 	jt[SSTORE].dynamicGas = gasSStore8037
+	// EIP-8038: EXTCODESIZE charges an additional warm-access "code reading"
+	// cost. EXTCODECOPY's extra cost is handled inline in gasExtCodeCopyEIP2929;
+	// EXTCODESIZE shares gasEip2929AccountCheck with BALANCE/EXTCODEHASH (which
+	// do not get the extra cost), so it needs a dedicated calculator.
+	jt[EXTCODESIZE].dynamicGas = gasExtCodeSize8037
+}
+
+// gasExtCodeSize8037 is the EXTCODESIZE gas calculator for Amsterdam. It adds
+// the EIP-8038 warm-access "code reading" cost on top of the account-access
+// cost computed by gasEip2929AccountCheck.
+func gasExtCodeSize8037(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (GasCosts, error) {
+	cost, err := gasEip2929AccountCheck(evm, contract, stack, mem, memorySize)
+	if err != nil {
+		return GasCosts{}, err
+	}
+	cost.RegularGas += params.WarmStorageReadCostEIP2929
+	return cost, nil
 }

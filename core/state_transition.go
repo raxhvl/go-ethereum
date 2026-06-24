@@ -230,12 +230,18 @@ func FloorDataGas(rules params.Rules, data []byte, accessList types.AccessList) 
 		tokenCost = params.TxCostFloorPerToken
 	}
 
+	// The floor cost is anchored to the transaction base cost. EIP-2780
+	// (Amsterdam) replaces the legacy 21000 base with TX_BASE (12000).
+	floorBase := params.TxGas
+	if rules.IsAmsterdam {
+		floorBase = params.TxBaseCost2780
+	}
 	// Check for overflow
-	if (math.MaxUint64-params.TxGas)/tokenCost < tokens {
+	if (math.MaxUint64-floorBase)/tokenCost < tokens {
 		return 0, ErrGasUintOverflow
 	}
 	// Minimum gas required for a transaction based on its data tokens (EIP-7623).
-	return params.TxGas + tokens*tokenCost, nil
+	return floorBase + tokens*tokenCost, nil
 }
 
 // toWordSize returns the ceiled word size required for init code payment calculation.
@@ -1015,6 +1021,10 @@ func (st *stateTransition) applyAuthorization(rules params.Rules, auth *types.Se
 		//     (account_exists), since no new account is created.
 		if st.state.Exist(authority) {
 			st.gasRemaining.RefundState(params.AccountCreationSize * st.evm.Context.CostPerStateByte)
+			// EIP-8038: the worst-case ACCOUNT_WRITE charged per authorization in
+			// the intrinsic cost is refunded to the regular refund counter when
+			// the authority account already exists (no new account is created).
+			st.state.AddRefund(params.AccountWriteAmsterdam)
 		}
 		//   - AUTH_BASE is refunded when no new delegation-indicator bytes are
 		//     written: either the authority already carries code/delegation
