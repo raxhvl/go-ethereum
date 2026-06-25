@@ -46,13 +46,6 @@ func (evm *EVM) precompile(addr common.Address) (PrecompiledContract, bool) {
 	return p, ok
 }
 
-// IsPrecompile reports whether addr is an active precompile for the current
-// fork ruleset.
-func (evm *EVM) IsPrecompile(addr common.Address) bool {
-	_, ok := evm.precompiles[addr]
-	return ok
-}
-
 // BlockContext provides the EVM with auxiliary information. Once provided
 // it shouldn't be modified.
 type BlockContext struct {
