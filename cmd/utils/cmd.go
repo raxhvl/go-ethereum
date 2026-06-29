@@ -394,13 +394,16 @@ func missingBlocks(chain *core.BlockChain, blocks []*types.Block) []*types.Block
 	return nil
 }
 
-// ExportChain exports a blockchain into the specified file, truncating any data
-// already present in the file.
-func ExportChain(blockchain *core.BlockChain, fn string) error {
-	log.Info("Exporting blockchain", "file", fn)
-
-	// Open the file handle and potentially wrap with a gzip stream
-	fh, err := os.OpenFile(fn, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+// withExportWriter opens fn (truncating, or appending when appendMode is set),
+// transparently wraps it in a gzip stream when the name ends in .gz, and invokes
+// write with the resulting writer. It centralizes the file/gzip plumbing shared
+// by every Export* helper.
+func withExportWriter(fn string, appendMode bool, write func(io.Writer) error) error {
+	flags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	if appendMode {
+		flags = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	}
+	fh, err := os.OpenFile(fn, flags, os.ModePerm)
 	if err != nil {
 		return err
 	}
@@ -408,15 +411,21 @@ func ExportChain(blockchain *core.BlockChain, fn string) error {
 
 	var writer io.Writer = fh
 	if strings.HasSuffix(fn, ".gz") {
-		writer = gzip.NewWriter(writer)
-		defer writer.(*gzip.Writer).Close()
+		gz := gzip.NewWriter(fh)
+		defer gz.Close()
+		writer = gz
 	}
-	// Iterate over the blocks and export them
-	if err := blockchain.Export(writer); err != nil {
+	return write(writer)
+}
+
+// ExportChain exports a blockchain into the specified file, truncating any data
+// already present in the file.
+func ExportChain(blockchain *core.BlockChain, fn string) error {
+	log.Info("Exporting blockchain", "file", fn)
+	if err := withExportWriter(fn, false, blockchain.Export); err != nil {
 		return err
 	}
 	log.Info("Exported blockchain", "file", fn)
-
 	return nil
 }
 
@@ -424,23 +433,35 @@ func ExportChain(blockchain *core.BlockChain, fn string) error {
 // the file if data already exists in it.
 func ExportAppendChain(blockchain *core.BlockChain, fn string, first uint64, last uint64) error {
 	log.Info("Exporting blockchain", "file", fn)
-
-	// Open the file handle and potentially wrap with a gzip stream
-	fh, err := os.OpenFile(fn, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.ModePerm)
-	if err != nil {
-		return err
-	}
-	defer fh.Close()
-	var writer io.Writer = fh
-	if strings.HasSuffix(fn, ".gz") {
-		writer = gzip.NewWriter(writer)
-		defer writer.(*gzip.Writer).Close()
-	}
-	// Iterate over the blocks and export them
-	if err := blockchain.ExportN(writer, first, last); err != nil {
+	if err := withExportWriter(fn, true, func(w io.Writer) error {
+		return blockchain.ExportN(w, first, last)
+	}); err != nil {
 		return err
 	}
 	log.Info("Exported blockchain to", "file", fn)
+	return nil
+}
+
+// ExportChainWithBAL exports the whole chain to fn in the `--with-bal` format,
+// truncating fn, pairing each block with its recomputed EIP-7928 access list.
+func ExportChainWithBAL(blockchain *core.BlockChain, fn string) error {
+	return exportChainWithBAL(blockchain, fn, false, 0, blockchain.CurrentBlock().Number.Uint64())
+}
+
+// ExportAppendChainWithBAL exports blocks [first,last] in the `--with-bal`
+// format, appending to fn if it already exists.
+func ExportAppendChainWithBAL(blockchain *core.BlockChain, fn string, first, last uint64) error {
+	return exportChainWithBAL(blockchain, fn, true, first, last)
+}
+
+func exportChainWithBAL(blockchain *core.BlockChain, fn string, appendMode bool, first, last uint64) error {
+	log.Info("Exporting blockchain (with BAL)", "file", fn)
+	if err := withExportWriter(fn, appendMode, func(w io.Writer) error {
+		return blockchain.ExportNWithBAL(w, first, last)
+	}); err != nil {
+		return err
+	}
+	log.Info("Exported blockchain (with BAL)", "file", fn)
 	return nil
 }
 

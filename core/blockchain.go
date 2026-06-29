@@ -1261,6 +1261,15 @@ func (bc *BlockChain) Export(w io.Writer) error {
 
 // ExportN writes a subset of the active chain to the given writer.
 func (bc *BlockChain) ExportN(w io.Writer, first uint64, last uint64) error {
+	return bc.exportN(w, first, last, func(w io.Writer, block *types.Block) error {
+		return block.EncodeRLP(w)
+	})
+}
+
+// exportN iterates the canonical blocks in [first,last], guarding against reorgs
+// and reporting progress, and invokes emit to serialize each one. It is shared by
+// ExportN and ExportNWithBAL so the iteration logic lives in a single place.
+func (bc *BlockChain) exportN(w io.Writer, first, last uint64, emit func(io.Writer, *types.Block) error) error {
 	if first > last {
 		return fmt.Errorf("export failed: first (%d) is greater than last (%d)", first, last)
 	}
@@ -1280,7 +1289,7 @@ func (bc *BlockChain) ExportN(w io.Writer, first uint64, last uint64) error {
 			return errors.New("export failed: chain reorg during export")
 		}
 		parentHash = block.Hash()
-		if err := block.EncodeRLP(w); err != nil {
+		if err := emit(w, block); err != nil {
 			return err
 		}
 		if time.Since(reported) >= statsReportLimit {

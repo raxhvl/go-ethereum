@@ -17,6 +17,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -451,7 +452,8 @@ func exportChain(ctx *cli.Context) error {
 	chain, db := utils.MakeChain(ctx, stack, true)
 	defer db.Close()
 
-	if ctx.Bool(withBALFlag.Name) {
+	withBAL := ctx.Bool(withBALFlag.Name)
+	if withBAL {
 		// Flip Amsterdam on in-memory so the export run produces EIP-7928 BALs,
 		// without persisting any change to the datadir's stored chain config.
 		// chain.Config() returns the live pointer and the processor reads the
@@ -460,12 +462,18 @@ func exportChain(ctx *cli.Context) error {
 		log.Info("Export with BAL: Amsterdam activated in-memory", "amsterdamTime", *chain.Config().AmsterdamTime)
 	}
 
+	// Pick the full-chain and ranged exporters once, BAL-aware.
+	exportFull, exportRange := utils.ExportChain, utils.ExportAppendChain
+	if withBAL {
+		exportFull, exportRange = utils.ExportChainWithBAL, utils.ExportAppendChainWithBAL
+	}
+
 	start := time.Now()
 
 	var err error
 	fp := ctx.Args().First()
 	if ctx.Args().Len() < 3 {
-		err = utils.ExportChain(chain, fp)
+		err = exportFull(chain, fp)
 	} else {
 		// This can be improved to allow for numbers larger than 9223372036854775807
 		first, ferr := strconv.ParseInt(ctx.Args().Get(1), 10, 64)
@@ -479,7 +487,7 @@ func exportChain(ctx *cli.Context) error {
 		if head := chain.CurrentSnapBlock(); uint64(last) > head.Number.Uint64() {
 			utils.Fatalf("Export error: block number %d larger than head block %d\n", uint64(last), head.Number.Uint64())
 		}
-		err = utils.ExportAppendChain(chain, fp, uint64(first), uint64(last))
+		err = exportRange(chain, fp, uint64(first), uint64(last))
 	}
 	if err != nil {
 		utils.Fatalf("Export error: %v\n", err)
@@ -500,11 +508,7 @@ func enableAmsterdamForBAL(cfg *params.ChainConfig) {
 		cfg.BlobScheduleConfig = &params.BlobScheduleConfig{}
 	}
 	if cfg.BlobScheduleConfig.Amsterdam == nil {
-		if cfg.BlobScheduleConfig.Osaka != nil {
-			cfg.BlobScheduleConfig.Amsterdam = cfg.BlobScheduleConfig.Osaka
-		} else {
-			cfg.BlobScheduleConfig.Amsterdam = params.DefaultOsakaBlobConfig
-		}
+		cfg.BlobScheduleConfig.Amsterdam = cmp.Or(cfg.BlobScheduleConfig.Osaka, params.DefaultOsakaBlobConfig)
 	}
 }
 
