@@ -446,8 +446,11 @@ func exportChain(ctx *cli.Context) error {
 		utils.Fatalf("This command requires an argument.")
 	}
 
-	stack, _ := makeConfigNode(ctx)
+	stack, cfg := makeConfigNode(ctx)
 	defer stack.Close()
+
+	// Start metrics export if enabled (periodic reporter, same as importChain).
+	utils.SetupMetrics(&cfg.Metrics)
 
 	chain, db := utils.MakeChain(ctx, stack, true)
 	defer db.Close()
@@ -470,9 +473,13 @@ func exportChain(ctx *cli.Context) error {
 
 	start := time.Now()
 
-	var err error
+	var (
+		err    error
+		blocks uint64
+	)
 	fp := ctx.Args().First()
 	if ctx.Args().Len() < 3 {
+		blocks = chain.CurrentBlock().Number.Uint64() + 1
 		err = exportFull(chain, fp)
 	} else {
 		// This can be improved to allow for numbers larger than 9223372036854775807
@@ -487,10 +494,16 @@ func exportChain(ctx *cli.Context) error {
 		if head := chain.CurrentSnapBlock(); uint64(last) > head.Number.Uint64() {
 			utils.Fatalf("Export error: block number %d larger than head block %d\n", uint64(last), head.Number.Uint64())
 		}
+		blocks = uint64(last-first) + 1
 		err = exportRange(chain, fp, uint64(first), uint64(last))
 	}
 	if err != nil {
 		utils.Fatalf("Export error: %v\n", err)
+	}
+	if withBAL && blocks > 0 {
+		raw, compressed := core.BALSizeTotals()
+		avgKiB := func(total int64) float64 { return float64(total) / float64(blocks) / 1024 }
+		fmt.Printf("avg BAL size: raw %.2f KiB, compressed %.2f KiB (%d blocks)\n", avgKiB(raw), avgKiB(compressed), blocks)
 	}
 	fmt.Printf("Export done in %v\n", time.Since(start))
 	return nil

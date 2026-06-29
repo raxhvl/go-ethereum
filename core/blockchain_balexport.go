@@ -25,8 +25,21 @@ import (
 	"github.com/ethereum/go-ethereum/core/types/bal"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/golang/snappy"
 )
+
+// Per-block EIP-7928 BAL size meters, marked during `export --with-bal`.
+var (
+	balSizeMeter           = metrics.NewRegisteredMeter("chain/bal/size", nil)
+	balSizeCompressedMeter = metrics.NewRegisteredMeter("chain/bal/size/compressed", nil)
+)
+
+// BALSizeTotals returns the cumulative raw and compressed BAL bytes metered.
+func BALSizeTotals() (raw, compressed int64) {
+	return balSizeMeter.Snapshot().Count(), balSizeCompressedMeter.Snapshot().Count()
+}
 
 // BALExportEntry is one record in a `geth export --with-bal` stream: a canonical
 // block paired with the RLP-encoded EIP-7928 block access list recomputed for it.
@@ -88,5 +101,7 @@ func (bc *BlockChain) writeBALEntry(w io.Writer, block *types.Block) error {
 			log.Warn("Recomputed BAL hash mismatch", "block", block.NumberU64(), "header", h.Hex(), "recomputed", got.Hex())
 		}
 	}
+	balSizeMeter.Mark(int64(len(balRLP)))
+	balSizeCompressedMeter.Mark(int64(len(snappy.Encode(nil, balRLP))))
 	return rlp.Encode(w, &BALExportEntry{Block: block, BAL: balRLP})
 }
