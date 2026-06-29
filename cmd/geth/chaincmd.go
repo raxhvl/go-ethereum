@@ -137,12 +137,17 @@ If only one file is used, an import error will result in the entire import proce
 multiple files are processed, the import process will continue even if an individual RLP file fails
 to import successfully.`,
 	}
+	withBALFlag = &cli.BoolFlag{
+		Name: "with-bal",
+		Usage: "Recompute and include the EIP-7928 block access list in the export. " +
+			"Activates Amsterdam in-memory for this run (datadir is left untouched).",
+	}
 	exportCommand = &cli.Command{
 		Action:    exportChain,
 		Name:      "export",
 		Usage:     "Export blockchain into file",
 		ArgsUsage: "<filename> [<blockNumFirst> <blockNumLast>]",
-		Flags:     slices.Concat([]cli.Flag{utils.CacheFlag}, utils.DatabaseFlags),
+		Flags:     slices.Concat([]cli.Flag{utils.CacheFlag, withBALFlag}, utils.DatabaseFlags),
 		Description: `
 Requires a first argument of the file to write to.
 Optional second and third arguments control the first and
@@ -445,6 +450,16 @@ func exportChain(ctx *cli.Context) error {
 
 	chain, db := utils.MakeChain(ctx, stack, true)
 	defer db.Close()
+
+	if ctx.Bool(withBALFlag.Name) {
+		// Flip Amsterdam on in-memory so the export run produces EIP-7928 BALs,
+		// without persisting any change to the datadir's stored chain config.
+		// chain.Config() returns the live pointer and the processor reads the
+		// rules per-block, so this takes effect for every exported block.
+		enableAmsterdamForBAL(chain.Config())
+		log.Info("Export with BAL: Amsterdam activated in-memory", "amsterdamTime", *chain.Config().AmsterdamTime)
+	}
+
 	start := time.Now()
 
 	var err error
@@ -471,6 +486,26 @@ func exportChain(ctx *cli.Context) error {
 	}
 	fmt.Printf("Export done in %v\n", time.Since(start))
 	return nil
+}
+
+// enableAmsterdamForBAL activates the Amsterdam fork from block 0 on the given
+// config so that block (re)processing constructs EIP-7928 block access lists.
+// It mutates the config in place; callers pass a config they intend to modify
+// (e.g. an export run's in-memory copy). The Amsterdam blob schedule must be
+// non-nil or the IsAmsterdam paths nil-dereference, so it is filled from Osaka.
+func enableAmsterdamForBAL(cfg *params.ChainConfig) {
+	zero := uint64(0)
+	cfg.AmsterdamTime = &zero
+	if cfg.BlobScheduleConfig == nil {
+		cfg.BlobScheduleConfig = &params.BlobScheduleConfig{}
+	}
+	if cfg.BlobScheduleConfig.Amsterdam == nil {
+		if cfg.BlobScheduleConfig.Osaka != nil {
+			cfg.BlobScheduleConfig.Amsterdam = cfg.BlobScheduleConfig.Osaka
+		} else {
+			cfg.BlobScheduleConfig.Amsterdam = params.DefaultOsakaBlobConfig
+		}
+	}
 }
 
 func importHistory(ctx *cli.Context) error {
