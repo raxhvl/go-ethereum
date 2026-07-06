@@ -132,6 +132,11 @@ type StateDB struct {
 	// Per-transaction state access footprint for EIP-7928
 	stateAccessList *bal.ConstructionBlockAccessList
 
+	// amsterdam reports whether the REAL Amsterdam fork is active, gating
+	// Amsterdam state-rule changes (e.g. EIP-8246) so they don't fire when BAL
+	// construction is merely forced via WithBAL.
+	amsterdam bool
+
 	// Block access index (0 for pre-execution, 1..n for transactions, n+1 for post-execution)
 	blockAccessIndex uint32
 
@@ -829,12 +834,11 @@ func (s *StateDB) Finalise(deleteEmptyObjects bool) *bal.ConstructionBlockAccess
 			// finalise or delete, so ignore it here.
 			continue
 		}
-		// EIP-8246 (Amsterdam, gated by BAL being enabled): a self-destructed
-		// same-transaction account that still holds balance is not deleted.
-		// Instead its nonce, code, and storage are cleared while the balance is
-		// preserved, so it survives as a balance-only account. The cleared
-		// object then falls through to the ordinary update path below.
-		if obj.selfDestructed && s.stateAccessList != nil && !obj.Balance().IsZero() {
+		// EIP-8246: a self-destructed same-tx account still holding balance is
+		// preserved as balance-only (nonce/code/storage cleared) instead of
+		// deleted, then falls through to the update path. Gated on the REAL
+		// Amsterdam fork, not WithBAL, since it moves the state root.
+		if obj.selfDestructed && s.amsterdam && !obj.Balance().IsZero() {
 			obj.clearPreservingBalance()
 		}
 		if obj.selfDestructed || (deleteEmptyObjects && obj.empty()) {
@@ -1499,7 +1503,10 @@ func (s *StateDB) Prepare(rules params.Rules, sender, coinbase common.Address, d
 	// Reset transient storage at the beginning of transaction execution
 	s.transientStorage = newTransientStorage()
 
-	if rules.IsAmsterdam {
+	// Build the EIP-7928 access list under Amsterdam or when forced via WithBAL.
+	// s.amsterdam stays on the real fork so WithBAL never perturbs execution.
+	s.amsterdam = rules.IsAmsterdam
+	if rules.BALEnabled() {
 		s.stateAccessList = bal.NewConstructionBlockAccessList()
 	}
 }

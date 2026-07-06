@@ -487,6 +487,11 @@ type ChainConfig struct {
 	// those cases.
 	EnableUBTAtGenesis bool `json:"enableUBTAtGenesis,omitempty"`
 
+	// WithBAL forces EIP-7928 BAL construction/serving without enabling any other
+	// Amsterdam rule, keeping execution byte-identical. In-memory only (never
+	// persisted); set by `geth import/export --with-bal`.
+	WithBAL bool `json:"-"`
+
 	// Various consensus engines
 	Ethash             *EthashConfig       `json:"ethash,omitempty"`
 	Clique             *CliqueConfig       `json:"clique,omitempty"`
@@ -864,6 +869,12 @@ func (c *ChainConfig) IsBPO5(num *big.Int, time uint64) bool {
 // IsAmsterdam returns whether time is either equal to the Amsterdam fork time or greater.
 func (c *ChainConfig) IsAmsterdam(num *big.Int, time uint64) bool {
 	return c.IsLondon(num) && isTimestampForked(c.AmsterdamTime, time)
+}
+
+// BALEnabled reports whether EIP-7928 block access lists are constructed for the
+// given block: under Amsterdam, or when forced via the WithBAL toggle.
+func (c *ChainConfig) BALEnabled(num *big.Int, time uint64) bool {
+	return c.IsAmsterdam(num, time) || c.WithBAL
 }
 
 // IsUBT returns whether time is either equal to the Verkle fork time or greater.
@@ -1386,6 +1397,9 @@ type Rules struct {
 	IsBerlin, IsLondon                                      bool
 	IsMerge, IsShanghai, IsCancun, IsPrague, IsOsaka        bool
 	IsAmsterdam, IsUBT                                      bool
+	// WithBAL forces EIP-7928 BAL construction without changing execution.
+	// Not a fork rule.
+	WithBAL bool
 }
 
 // Rules ensures c's ChainID is not nil.
@@ -1413,5 +1427,12 @@ func (c *ChainConfig) Rules(num *big.Int, isMerge bool, timestamp uint64) Rules 
 		IsAmsterdam:      isMerge && c.IsAmsterdam(num, timestamp),
 		IsUBT:            isUBT,
 		IsEIP4762:        isUBT,
+		WithBAL:          c.WithBAL,
 	}
+}
+
+// BALEnabled reports whether EIP-7928 block access lists are constructed under
+// these rules (Amsterdam, or forced via WithBAL).
+func (r Rules) BALEnabled() bool {
+	return r.IsAmsterdam || r.WithBAL
 }

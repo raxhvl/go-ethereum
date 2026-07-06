@@ -97,8 +97,14 @@ func (p *ParallelStateProcessor) prepareExecResult(block *types.Block, tExecStar
 		allLogs = append(allLogs, result.receipt.Logs...)
 		allReceipts = append(allReceipts, result.receipt)
 	}
-	// Block gas = max(sum_regular, sum_state) per EIP-8037.
-	blockGasUsed := max(sumRegular, sumState)
+	// Amsterdam uses 2D block gas (EIP-8037); pre-Amsterdam forks have no 2D
+	// dimensions, so block gas is the ordinary cumulative receipt gas.
+	var blockGasUsed uint64
+	if p.chainConfig().IsAmsterdam(block.Number(), block.Time()) {
+		blockGasUsed = max(sumRegular, sumState)
+	} else {
+		blockGasUsed = cumulativeReceipt
+	}
 	if blockGasUsed > header.GasLimit {
 		return errResult(fmt.Errorf("gas limit exceeded"))
 	}

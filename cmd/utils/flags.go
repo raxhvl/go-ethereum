@@ -2473,6 +2473,14 @@ func MakeChain(ctx *cli.Context, stack *node.Node, readonly bool) (*core.BlockCh
 	if ctx.IsSet(LogSlowBlockFlag.Name) {
 		options.SlowBlockThreshold = ctx.Duration(LogSlowBlockFlag.Name)
 	}
+	// Configure BAL prefetch concurrency for the consume path. Commands that don't
+	// register the flag report 0 here; 0 is never valid (the prefetcher divides by
+	// it), so fall back to the same NumCPU default the node uses.
+	options.PrefetchWorkers = int(ctx.Uint(PrefetchWorkersFlag.Name))
+	if options.PrefetchWorkers == 0 {
+		options.PrefetchWorkers = runtime.NumCPU()
+	}
+	options.BlockingPrefetch = ctx.Bool(BlockingPrefetchFlag.Name)
 	if options.ArchiveMode && !options.Preimages {
 		options.Preimages = true
 		log.Info("Enabling recording of key preimages since archive mode is used")

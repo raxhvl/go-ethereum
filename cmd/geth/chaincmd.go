@@ -17,7 +17,6 @@
 package main
 
 import (
-	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,6 +89,7 @@ if one is set.  Otherwise it prints the genesis from the datadir.`,
 		Usage:     "Import a blockchain file",
 		ArgsUsage: "<filename> (<filename 2> ... <filename N>) ",
 		Flags: slices.Concat([]cli.Flag{
+			withBALFlag,
 			utils.GCModeFlag,
 			utils.SnapshotFlag,
 			utils.CacheFlag,
@@ -140,8 +140,9 @@ to import successfully.`,
 	}
 	withBALFlag = &cli.BoolFlag{
 		Name: "with-bal",
-		Usage: "Recompute and include the EIP-7928 block access list in the export. " +
-			"Activates Amsterdam in-memory for this run (datadir is left untouched).",
+		Usage: "Build and serve the EIP-7928 block access list on top of the current fork. " +
+			"Forces BAL construction/serving in-memory for this run without enabling any " +
+			"other Amsterdam rule, so execution stays byte-identical (datadir is left untouched).",
 	}
 	exportCommand = &cli.Command{
 		Action:    exportChain,
@@ -374,6 +375,14 @@ func importChain(ctx *cli.Context) error {
 	chain, db := utils.MakeChain(ctx, stack, false)
 	defer db.Close()
 
+	// --with-bal: attach sidecar BALs and run the consume path, which serves
+	// reads from them and cross-checks against the recomputed list.
+	importFn := utils.ImportChain
+	if ctx.Bool(withBALFlag.Name) {
+		forceBALOnFork(chain)
+		importFn = utils.ImportChainWithBAL
+	}
+
 	// Start periodically gathering memory profiles
 	var peakMemAlloc, peakMemSys atomic.Uint64
 	go func() {
@@ -395,13 +404,13 @@ func importChain(ctx *cli.Context) error {
 	var importErr error
 
 	if ctx.Args().Len() == 1 {
-		if err := utils.ImportChain(chain, ctx.Args().First()); err != nil {
+		if err := importFn(chain, ctx.Args().First()); err != nil {
 			importErr = err
 			log.Error("Import error", "err", err)
 		}
 	} else {
 		for _, arg := range ctx.Args().Slice() {
-			if err := utils.ImportChain(chain, arg); err != nil {
+			if err := importFn(chain, arg); err != nil {
 				importErr = err
 				log.Error("Import error", "file", arg, "err", err)
 				if err == utils.ErrImportInterrupted {
@@ -441,6 +450,14 @@ func importChain(ctx *cli.Context) error {
 	return importErr
 }
 
+// forceBALOnFork forces EIP-7928 BAL construction and serving on the chain's
+// existing fork, enabling no other Amsterdam rule, so execution stays
+// byte-identical. In-memory only; the datadir config is untouched.
+func forceBALOnFork(chain *core.BlockChain) {
+	chain.Config().WithBAL = true
+	log.Info("BAL forced; execution fork unchanged", "fork", chain.Config().LatestFork(chain.CurrentBlock().Time))
+}
+
 func exportChain(ctx *cli.Context) error {
 	if ctx.Args().Len() < 1 {
 		utils.Fatalf("This command requires an argument.")
@@ -457,12 +474,7 @@ func exportChain(ctx *cli.Context) error {
 
 	withBAL := ctx.Bool(withBALFlag.Name)
 	if withBAL {
-		// Flip Amsterdam on in-memory so the export run produces EIP-7928 BALs,
-		// without persisting any change to the datadir's stored chain config.
-		// chain.Config() returns the live pointer and the processor reads the
-		// rules per-block, so this takes effect for every exported block.
-		enableAmsterdamForBAL(chain.Config())
-		log.Info("Export with BAL: Amsterdam activated in-memory", "amsterdamTime", *chain.Config().AmsterdamTime)
+		forceBALOnFork(chain)
 	}
 
 	// Pick the full-chain and ranged exporters once, BAL-aware.
@@ -507,22 +519,6 @@ func exportChain(ctx *cli.Context) error {
 	}
 	fmt.Printf("Export done in %v\n", time.Since(start))
 	return nil
-}
-
-// enableAmsterdamForBAL activates the Amsterdam fork from block 0 on the given
-// config so that block (re)processing constructs EIP-7928 block access lists.
-// It mutates the config in place; callers pass a config they intend to modify
-// (e.g. an export run's in-memory copy). The Amsterdam blob schedule must be
-// non-nil or the IsAmsterdam paths nil-dereference, so it is filled from Osaka.
-func enableAmsterdamForBAL(cfg *params.ChainConfig) {
-	zero := uint64(0)
-	cfg.AmsterdamTime = &zero
-	if cfg.BlobScheduleConfig == nil {
-		cfg.BlobScheduleConfig = &params.BlobScheduleConfig{}
-	}
-	if cfg.BlobScheduleConfig.Amsterdam == nil {
-		cfg.BlobScheduleConfig.Amsterdam = cmp.Or(cfg.BlobScheduleConfig.Osaka, params.DefaultOsakaBlobConfig)
-	}
 }
 
 func importHistory(ctx *cli.Context) error {

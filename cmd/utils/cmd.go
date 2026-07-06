@@ -40,6 +40,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state/snapshot"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/types/bal"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -220,6 +221,100 @@ func ImportChain(chain *core.BlockChain, fn string) error {
 			break
 		}
 		// Import the batch.
+		if checkInterrupt() {
+			return errors.New("interrupted")
+		}
+		missing := missingBlocks(chain, blocks[:i])
+		if len(missing) == 0 {
+			log.Info("Skipping batch as all blocks present", "batch", batch, "first", blocks[0].Hash(), "last", blocks[i-1].Hash())
+			continue
+		}
+		if failindex, err := chain.InsertChain(missing); err != nil {
+			var failnumber uint64
+			if failindex > 0 && failindex < len(missing) {
+				failnumber = missing[failindex].NumberU64()
+			} else {
+				failnumber = missing[0].NumberU64()
+			}
+			return fmt.Errorf("invalid block %d: %v", failnumber, err)
+		}
+	}
+	return nil
+}
+
+// ImportChainWithBAL imports a chain written by `export --with-bal`: each record
+// is a core.BALExportEntry pairing a block with its RLP-encoded EIP-7928 access
+// list. The sidecar is decoded and attached before insertion so the consume path
+// serves reads from it and cross-checks the recomputed list. The caller must set
+// WithBAL (or Amsterdam) first. Mirrors ImportChain.
+func ImportChainWithBAL(chain *core.BlockChain, fn string) error {
+	// Watch for Ctrl-C while the import is running.
+	interrupt := make(chan os.Signal, 1)
+	stop := make(chan struct{})
+	signal.Notify(interrupt, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(interrupt)
+	defer close(interrupt)
+	go func() {
+		if _, ok := <-interrupt; ok {
+			log.Info("Interrupted during import, stopping at next batch")
+		}
+		close(stop)
+	}()
+	checkInterrupt := func() bool {
+		select {
+		case <-stop:
+			return true
+		default:
+			return false
+		}
+	}
+
+	log.Info("Importing blockchain (with BAL)", "file", fn)
+
+	// Open the file handle and potentially unwrap the gzip stream.
+	fh, err := os.Open(fn)
+	if err != nil {
+		return err
+	}
+	defer fh.Close()
+
+	var reader io.Reader = fh
+	if strings.HasSuffix(fn, ".gz") {
+		if reader, err = gzip.NewReader(reader); err != nil {
+			return err
+		}
+	}
+	stream := rlp.NewStream(reader, 0)
+
+	blocks := make(types.Blocks, importBatchSize)
+	n := 0
+	for batch := 0; ; batch++ {
+		if checkInterrupt() {
+			return ErrImportInterrupted
+		}
+		i := 0
+		for ; i < importBatchSize; i++ {
+			var entry core.BALExportEntry
+			if err := stream.Decode(&entry); err == io.EOF {
+				break
+			} else if err != nil {
+				return fmt.Errorf("at block %d: %v", n, err)
+			}
+			// Genesis has no parent state and carries an empty sidecar; never import it.
+			if entry.Block.NumberU64() == 0 {
+				i--
+				continue
+			}
+			al := new(bal.BlockAccessList)
+			if err := rlp.DecodeBytes(entry.BAL, al); err != nil {
+				return fmt.Errorf("decode BAL for block %d: %v", entry.Block.NumberU64(), err)
+			}
+			blocks[i] = entry.Block.WithAccessListUnsafe(al)
+			n++
+		}
+		if i == 0 {
+			break
+		}
 		if checkInterrupt() {
 			return errors.New("interrupted")
 		}

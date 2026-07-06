@@ -143,7 +143,7 @@ func PreExecution(ctx context.Context, beaconRoot *common.Hash, parent common.Ha
 	defer spanEnd(nil)
 
 	var blockAccessList *bal.ConstructionBlockAccessList
-	if config.IsAmsterdam(number, time) {
+	if config.BALEnabled(number, time) {
 		blockAccessList = bal.NewConstructionBlockAccessList()
 	}
 	// EIP-4788
@@ -164,7 +164,7 @@ func PostExecution(ctx context.Context, config *params.ChainConfig, number *big.
 	_, _, spanEnd := telemetry.StartSpan(ctx, "core.postExecution")
 	defer spanEnd(&err)
 
-	if config.IsAmsterdam(number, time) {
+	if config.BALEnabled(number, time) {
 		blockAccessList = bal.NewConstructionBlockAccessList()
 	}
 	rules := config.Rules(number, true, time) // IsMerge is always true

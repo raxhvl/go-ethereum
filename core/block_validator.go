@@ -129,6 +129,15 @@ func (v *BlockValidator) ValidateBody(block *types.Block) error {
 				return fmt.Errorf("invalid block access list: %v", err)
 			}
 		}
+	} else if v.config.WithBAL {
+		// WithBAL: blocks are unmutated so the header has no BAL hash to compare.
+		// Validate the attached list structurally; its correctness vs the
+		// recomputed list is checked during execution (parallel_state_processor).
+		if block.AccessList() != nil {
+			if err := block.AccessList().Validate(block.GasLimit(), len(block.Transactions())); err != nil {
+				return fmt.Errorf("invalid block access list: %v", err)
+			}
+		}
 	} else if block.Header().BlockAccessListHash != nil || block.AccessList() != nil {
 		return errors.New("block had access list before Amsterdam")
 	}
