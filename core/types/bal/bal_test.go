@@ -22,6 +22,7 @@ import (
 	"math"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -33,7 +34,7 @@ import (
 
 func makeTestConstructionBAL() *ConstructionBlockAccessList {
 	return &ConstructionBlockAccessList{
-		map[common.Address]*ConstructionAccountAccess{
+		Accounts: map[common.Address]*ConstructionAccountAccess{
 			common.BytesToAddress([]byte{0xff, 0xff}): {
 				StorageWrites: map[common.Hash]map[uint32]common.Hash{
 					common.BytesToHash([]byte{0x01}): {
@@ -104,6 +105,158 @@ func TestBALEncoding(t *testing.T) {
 	}
 	if !reflect.DeepEqual(bal.ToEncodingObj(), &dec) {
 		t.Fatal("decoded BAL doesn't match")
+	}
+}
+
+// TestBALEmptinessRoundtrip builds a BAL through the construction API with a mix
+// of empty and existing accounts/slots — including slots that were empty at block
+// start and then created — and asserts the emptiness signal survives encode/decode
+// via the two bitmaps.
+func TestBALEmptinessRoundtrip(t *testing.T) {
+	var (
+		addrEmpty = common.BytesToAddress([]byte{0x01}) // read-only, empty at block start
+		addrExist = common.BytesToAddress([]byte{0x02}) // read-only, exists at block start
+		addrSlots = common.BytesToAddress([]byte{0x03}) // carries the slot mix
+
+		slotReadEmpty = common.BytesToHash([]byte{0x10}) // read-only, zero at start
+		slotReadExist = common.BytesToHash([]byte{0x11}) // read-only, nonzero at start
+		slotMadeEmpty = common.BytesToHash([]byte{0x12}) // zero at start, then written (created)
+		slotMadeExist = common.BytesToHash([]byte{0x13}) // nonzero at start, then written
+	)
+
+	b := NewConstructionBlockAccessList()
+	// Two bare reads: one resolves empty, one resolves existing.
+	b.AccountRead(addrEmpty)
+	b.AccountEmpty(addrEmpty)
+	b.AccountRead(addrExist)
+	// Slot mix on a third account.
+	b.StorageRead(addrSlots, slotReadEmpty)
+	b.SlotEmpty(addrSlots, slotReadEmpty)
+	b.StorageRead(addrSlots, slotReadExist)
+	b.SlotEmpty(addrSlots, slotMadeEmpty) // observed empty at first read...
+	b.StorageWrite(1, addrSlots, slotMadeEmpty, common.BytesToHash([]byte{0x99}))
+	b.StorageWrite(1, addrSlots, slotMadeExist, common.BytesToHash([]byte{0xAA}))
+
+	var buf bytes.Buffer
+	if err := b.EncodeRLP(&buf); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var dec BlockAccessList
+	if err := rlp.DecodeBytes(buf.Bytes(), &dec); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// The emptiness sets must survive the round-trip exactly.
+	enc := b.ToEncodingObj()
+	if !reflect.DeepEqual(enc.EmptyAccounts, dec.EmptyAccounts) {
+		t.Fatalf("empty accounts mismatch:\n got %+v\nwant %+v", dec.EmptyAccounts, enc.EmptyAccounts)
+	}
+	if !reflect.DeepEqual(enc.EmptySlots, dec.EmptySlots) {
+		t.Fatalf("empty slots mismatch:\n got %+v\nwant %+v", dec.EmptySlots, enc.EmptySlots)
+	}
+
+	if _, ok := dec.EmptyAccounts[addrEmpty]; !ok {
+		t.Error("addrEmpty: expected empty account")
+	}
+	if _, ok := dec.EmptyAccounts[addrExist]; ok {
+		t.Error("addrExist: expected not marked empty")
+	}
+	isEmpty := func(slot common.Hash) bool {
+		_, ok := dec.EmptySlots[addrSlots][slot]
+		return ok
+	}
+	for _, tc := range []struct {
+		slot common.Hash
+		want bool
+		name string
+	}{
+		{slotReadEmpty, true, "slotReadEmpty"},
+		{slotReadExist, false, "slotReadExist"},
+		{slotMadeEmpty, true, "slotMadeEmpty (created from zero)"},
+		{slotMadeExist, false, "slotMadeExist (written over nonzero)"},
+	} {
+		if got := isEmpty(tc.slot); got != tc.want {
+			t.Errorf("%s: empty=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// encodeBALRaw assembles the wire form [accounts, acctBM, slotBM] with
+// caller-chosen bitmap bytes, so a test can feed DecodeRLP a mismatched bitmap.
+func encodeBALRaw(t *testing.T, accounts []AccountAccess, acctBM, slotBM []byte) []byte {
+	t.Helper()
+	var w bytes.Buffer
+	buf := rlp.NewEncoderBuffer(&w)
+	outer := buf.List()
+	inner := buf.List()
+	for i := range accounts {
+		if err := accounts[i].EncodeRLP(buf); err != nil {
+			t.Fatalf("encode account: %v", err)
+		}
+	}
+	buf.ListEnd(inner)
+	buf.WriteBytes(acctBM)
+	buf.WriteBytes(slotBM)
+	buf.ListEnd(outer)
+	if err := buf.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	return w.Bytes()
+}
+
+// TestBALEmptinessBitmapSizeMismatch locks the DecodeRLP guards: a wire BAL
+// whose emptiness bitmaps don't match the account/slot counts must be rejected.
+// A wrong-sized bitmap means the bits no longer describe the listed items — a
+// consensus-critical rejection, not a best-effort parse.
+func TestBALEmptinessBitmapSizeMismatch(t *testing.T) {
+	src := makeTestBAL(true)
+	accounts := src.Accounts
+	acctBytes := bitmapLen(len(accounts))
+	slotBytes := bitmapLen(src.slotCount())
+
+	// Sanity: correctly-sized (all-zero) bitmaps decode without error.
+	if err := rlp.DecodeBytes(encodeBALRaw(t, accounts, make([]byte, acctBytes), make([]byte, slotBytes)), new(BlockAccessList)); err != nil {
+		t.Fatalf("correctly-sized bitmaps must decode: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name           string
+		acctBM, slotBM []byte
+	}{
+		{"account bitmap too long", make([]byte, acctBytes+1), make([]byte, slotBytes)},
+		{"account bitmap too short", make([]byte, acctBytes-1), make([]byte, slotBytes)},
+		{"slot bitmap too long", make([]byte, acctBytes), make([]byte, slotBytes+1)},
+		{"slot bitmap too short", make([]byte, acctBytes), make([]byte, slotBytes-1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := rlp.DecodeBytes(encodeBALRaw(t, accounts, tc.acctBM, tc.slotBM), new(BlockAccessList))
+			if err == nil {
+				t.Fatal("expected size-mismatch error, got nil")
+			}
+			if !strings.Contains(err.Error(), "bitmap size mismatch") {
+				t.Fatalf("expected bitmap size mismatch error, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestEmptyBitmapPacking locks the consensus-critical LSB-first bit order.
+func TestEmptyBitmapPacking(t *testing.T) {
+	bm := make([]byte, bitmapLen(10))
+	if len(bm) != 2 {
+		t.Fatalf("bitmapLen(10) = %d bytes, want 2", len(bm))
+	}
+	setBit(bm, 0)
+	setBit(bm, 3)
+	setBit(bm, 9)
+	// bit0,bit3 -> byte0 = 0b0000_1001 = 0x09; bit9 -> byte1 = 0b0000_0010 = 0x02.
+	if bm[0] != 0x09 || bm[1] != 0x02 {
+		t.Fatalf("packed bitmap = %#x, want [0x09 0x02]", bm)
+	}
+	for i, want := range map[int]bool{0: true, 1: false, 3: true, 8: false, 9: true} {
+		if getBit(bm, i) != want {
+			t.Errorf("getBit(%d) = %v, want %v", i, getBit(bm, i), want)
+		}
 	}
 }
 
@@ -248,12 +401,12 @@ func makeTestAccountAccess(sort bool) AccountAccess {
 }
 
 func makeTestBAL(sort bool) *BlockAccessList {
-	list := make(BlockAccessList, 0, 5)
+	list := BlockAccessList{Accounts: make([]AccountAccess, 0, 5)}
 	for i := 0; i < 5; i++ {
-		list = append(list, makeTestAccountAccess(sort))
+		list.Accounts = append(list.Accounts, makeTestAccountAccess(sort))
 	}
 	if sort {
-		slices.SortFunc(list, func(a, b AccountAccess) int {
+		slices.SortFunc(list.Accounts, func(a, b AccountAccess) int {
 			return bytes.Compare(a.Address[:], b.Address[:])
 		})
 	}
@@ -273,7 +426,7 @@ func TestBlockAccessListCopy(t *testing.T) {
 	}
 
 	// Make sure the mutations on copy won't affect the origin
-	for _, aa := range *cpyCpy {
+	for _, aa := range cpyCpy.Accounts {
 		for i := 0; i < len(aa.StorageReads); i++ {
 			aa.StorageReads[i] = new(uint256.Int).SetBytes(testrand.Bytes(32))
 		}
@@ -292,8 +445,8 @@ func TestBlockAccessListItemCount(t *testing.T) {
 	addr1 := common.Address(testrand.Bytes(20))
 	addr2 := common.Address(testrand.Bytes(20))
 	one := func() *uint256.Int { return new(uint256.Int).SetBytes(testrand.Bytes(32)) }
-	bal := &BlockAccessList{
-		AccountAccess{
+	bal := &BlockAccessList{Accounts: []AccountAccess{
+		{
 			Address: addr1,
 			StorageChanges: []encodingSlotChanges{
 				{Slot: one(), SlotChanges: []encodingStorageWrite{{BlockAccessIndex: 0, PostValue: one()}, {BlockAccessIndex: 1, PostValue: one()}}},
@@ -301,8 +454,8 @@ func TestBlockAccessListItemCount(t *testing.T) {
 			},
 			StorageReads: []*uint256.Int{one()},
 		},
-		AccountAccess{Address: addr2}, // address-only, no slots
-	}
+		{Address: addr2}, // address-only, no slots
+	}}
 	// 2 addresses + 2 write-slots + 1 read-slot = 5 items.
 	// (Multiple TxIdx writes to the same slot count as ONE item.)
 	if got := bal.itemCount(); got != 5 {
@@ -314,16 +467,16 @@ func TestBlockAccessListValidateSize(t *testing.T) {
 	// Build a BAL with exactly 30 items: 3 addresses, each with 9 storage
 	// slots (some writes, some reads). 3 + 9*3 = 30.
 	one := func() *uint256.Int { return new(uint256.Int).SetBytes(testrand.Bytes(32)) }
-	bal := make(BlockAccessList, 3)
-	for i := range bal {
-		bal[i].Address = common.Address(testrand.Bytes(20))
+	bal := BlockAccessList{Accounts: make([]AccountAccess, 3)}
+	for i := range bal.Accounts {
+		bal.Accounts[i].Address = common.Address(testrand.Bytes(20))
 		for j := 0; j < 5; j++ {
-			bal[i].StorageChanges = append(bal[i].StorageChanges, encodingSlotChanges{
+			bal.Accounts[i].StorageChanges = append(bal.Accounts[i].StorageChanges, encodingSlotChanges{
 				Slot: one(), SlotChanges: []encodingStorageWrite{{BlockAccessIndex: 0, PostValue: one()}},
 			})
 		}
 		for j := 0; j < 4; j++ {
-			bal[i].StorageReads = append(bal[i].StorageReads, one())
+			bal.Accounts[i].StorageReads = append(bal.Accounts[i].StorageReads, one())
 		}
 	}
 	if got := bal.itemCount(); got != 30 {

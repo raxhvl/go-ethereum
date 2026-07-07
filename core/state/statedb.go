@@ -628,9 +628,14 @@ func (s *StateDB) getStateObject(addr common.Address) *stateObject {
 	elapsed := time.Since(start)
 	s.AccountReads += elapsed
 
-	// Short circuit if the account is not found
+	// Short circuit if the account is not found. This reader read hits block-start
+	// state, so a miss here means the account was empty at block start; record it
+	// for the BAL emptiness signal.
 	if acct == nil {
 		accountReadEmptyTimer.Update(elapsed)
+		if s.stateAccessList != nil {
+			s.stateAccessList.AccountEmpty(addr)
+		}
 		return nil
 	}
 	accountReadExistTimer.Update(elapsed)

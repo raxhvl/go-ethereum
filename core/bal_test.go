@@ -94,12 +94,30 @@ func (e *balTestEnv) run(t *testing.T, gen func(*BlockGen)) (*bal.BlockAccessLis
 	return blocks[0].AccessList(), receipts[0]
 }
 
+// runN generates n consecutive Amsterdam blocks — gen is called once per block
+// with its 0-based index — and returns the per-block BALs. Used to observe
+// emptiness across a block boundary: the recorder's job is to reflect the
+// pre-state at the start of each block, so its state must not carry over.
+func (e *balTestEnv) runN(t *testing.T, n int, gen func(i int, b *BlockGen)) []*bal.BlockAccessList {
+	t.Helper()
+	engine := beacon.New(ethash.NewFaker())
+	_, blocks, _ := GenerateChainWithGenesis(e.gspec, engine, n, gen)
+	bals := make([]*bal.BlockAccessList, len(blocks))
+	for i, blk := range blocks {
+		if blk.AccessList() == nil {
+			t.Fatalf("block %d: expected non-nil block access list", i)
+		}
+		bals[i] = blk.AccessList()
+	}
+	return bals
+}
+
 // --- assertion helpers ---
 
 func findAccount(b *bal.BlockAccessList, addr common.Address) *bal.AccountAccess {
-	for i := range *b {
-		if (*b)[i].Address == addr {
-			return &(*b)[i]
+	for i := range b.Accounts {
+		if b.Accounts[i].Address == addr {
+			return &b.Accounts[i]
 		}
 	}
 	return nil
@@ -143,6 +161,16 @@ func assertAbsent(t *testing.T, b *bal.BlockAccessList, addr common.Address) {
 	if findAccount(b, addr) != nil {
 		t.Fatalf("address %x must NOT be in BAL\n%s", addr, b.PrettyPrint())
 	}
+}
+
+func isEmptyAccount(b *bal.BlockAccessList, addr common.Address) bool {
+	_, ok := b.EmptyAccounts[addr]
+	return ok
+}
+
+func isEmptySlot(b *bal.BlockAccessList, addr common.Address, slot common.Hash) bool {
+	_, ok := b.EmptySlots[addr][slot]
+	return ok
 }
 
 func assertEmpty(t *testing.T, aa *bal.AccountAccess) {
@@ -554,6 +582,62 @@ func TestBALSenderRecordedOnRevert(t *testing.T) {
 }
 
 // ============================== Storage inclusion ==============================
+
+// TestBALAccountEmptinessIsBlockStartAndClears empirically pins two properties
+// of the getStateObject recording site:
+//   - it records emptiness of the *block-start* pre-state, not the block-end
+//     state: an account created during block 0 is still flagged empty for block 0.
+//   - the recorder does not leak across blocks: by block 1 the account exists at
+//     block start, so it must NOT be flagged empty.
+func TestBALAccountEmptinessIsBlockStartAndClears(t *testing.T) {
+	to := common.HexToAddress("0xbeef")
+	env := newBALTestEnv(nil)
+
+	bals := env.runN(t, 2, func(i int, g *BlockGen) {
+		g.AddTx(env.tx(uint64(i), &to, big.NewInt(1000), txGasNewAccount, 0, nil))
+	})
+
+	// Block 0: recipient did not exist at block start; this tx creates it. The
+	// bit reflects block-start pre-state, so it must be flagged despite existing
+	// by block end.
+	if !isEmptyAccount(bals[0], to) {
+		t.Fatalf("block 0: recipient created this block must be flagged empty-at-start\n%s", bals[0].PrettyPrint())
+	}
+	// Block 1: recipient existed at block start (created in block 0). It is
+	// touched again (so it IS in the BAL), but must not be flagged empty —
+	// otherwise block 0's recording leaked into block 1.
+	assertPresent(t, bals[1], to)
+	if isEmptyAccount(bals[1], to) {
+		t.Fatalf("block 1: recipient existed at block start; emptiness leaked from block 0\n%s", bals[1].PrettyPrint())
+	}
+}
+
+// TestBALSlotEmptinessIsBlockStartAndClears is the storage-slot analog for the
+// GetCommittedState recording site: a slot zero at block-0 start is flagged even
+// though the block writes it, and the flag does not persist into block 1 where
+// the slot holds a committed non-zero value at block start.
+func TestBALSlotEmptinessIsBlockStartAndClears(t *testing.T) {
+	contract := common.HexToAddress("0xc1")
+	slot := common.BigToHash(big.NewInt(0x01))
+	// PUSH1 0x42 PUSH1 0x01 SSTORE STOP — SSTORE reads committed state first.
+	code := []byte{0x60, 0x42, 0x60, 0x01, 0x55, 0x00}
+	env := newBALTestEnv(types.GenesisAlloc{contract: {Code: code, Balance: common.Big0}})
+
+	bals := env.runN(t, 2, func(i int, g *BlockGen) {
+		g.AddTx(env.tx(uint64(i), &contract, big.NewInt(0), 1_000_000, 0, nil))
+	})
+
+	// Block 0: slot is zero at block start; the SSTORE's committed-value read
+	// resolves zero, so the slot is flagged empty even though it's written.
+	if !isEmptySlot(bals[0], contract, slot) {
+		t.Fatalf("block 0: slot zero-at-start must be flagged empty\n%s", bals[0].PrettyPrint())
+	}
+	// Block 1: slot holds 0x42 at block start; the committed-value read resolves
+	// non-zero, so it must not be flagged. A leaked recorder would carry it over.
+	if isEmptySlot(bals[1], contract, slot) {
+		t.Fatalf("block 1: slot non-zero at block start; emptiness leaked from block 0\n%s", bals[1].PrettyPrint())
+	}
+}
 
 // TestBALStorageWriteRecorded: SSTORE places the slot in storage_changes and
 // keeps it out of storage_reads.

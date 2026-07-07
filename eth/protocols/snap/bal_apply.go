@@ -96,7 +96,7 @@ func (s *syncerV2) isStorageFetched(accountHash, storageHash common.Hash) bool {
 // intentionally left stale. It will be recomputed during the trie rebuild.
 func (s *syncerV2) applyAccessList(b *bal.BlockAccessList, batch ethdb.Batch) error {
 	// Iterate over all accounts in the access list
-	for _, access := range *b {
+	for _, access := range b.Accounts {
 		addr := access.Address
 		accountHash := crypto.Keccak256Hash(addr[:])
 

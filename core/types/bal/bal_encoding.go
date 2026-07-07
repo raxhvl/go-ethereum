@@ -39,40 +39,142 @@ import (
 // These are objects used as input for the access list encoding. They mirror
 // the spec format.
 
-// BlockAccessList is the encoding format of ConstructionBlockAccessList.
-type BlockAccessList []AccountAccess
+// BlockAccessList is the encoding format of ConstructionBlockAccessList. On top
+// of the EIP-7928 account list it carries the block-start emptiness signal:
+// which accessed accounts were non-existent, and which accessed slots were zero,
+// at the block-start pre-state. Wire form:
+//
+//	[ accounts, accountBitmap, slotBitmap ]
+//
+// One bit per item in canonical order — accounts in list order; slots per
+// account, storage reads then storage changes. Bits are packed LSB-first
+// (bit i -> byte i>>3, position i&7); the order is consensus-critical.
+type BlockAccessList struct {
+	Accounts      []AccountAccess
+	EmptyAccounts map[common.Address]struct{}
+	EmptySlots    map[common.Address]map[common.Hash]struct{}
+}
 
-// EncodeRLP implements rlp.Encoder. It encodes the access list as a single
-// RLP list of AccountAccess entries.
+func bitmapLen(n int) int          { return (n + 7) >> 3 }
+func setBit(bm []byte, i int)      { bm[i>>3] |= 1 << uint(i&7) }
+func getBit(bm []byte, i int) bool { return bm[i>>3]&(1<<uint(i&7)) != 0 }
+
+// slotCount returns the number of items in the global slot order.
+func (e *BlockAccessList) slotCount() int {
+	n := 0
+	for i := range e.Accounts {
+		n += len(e.Accounts[i].StorageReads) + len(e.Accounts[i].StorageChanges)
+	}
+	return n
+}
+
+// walkSlots visits each item in the global slot order, passing its bit position,
+// account, and slot key.
+func (e *BlockAccessList) walkSlots(fn func(pos int, addr common.Address, slot common.Hash)) {
+	pos := 0
+	for i := range e.Accounts {
+		a := &e.Accounts[i]
+		for _, r := range a.StorageReads {
+			fn(pos, a.Address, common.Hash(r.Bytes32()))
+			pos++
+		}
+		for _, c := range a.StorageChanges {
+			fn(pos, a.Address, common.Hash(c.Slot.Bytes32()))
+			pos++
+		}
+	}
+}
+
+// EncodeRLP implements rlp.Encoder. Emptiness is projected onto the two bitmaps
+// by walking the account list, so only emptiness of listed items is encoded.
 func (e BlockAccessList) EncodeRLP(w io.Writer) error {
 	buf := rlp.NewEncoderBuffer(w)
-	l := buf.List()
-	for i := range e {
-		if err := e[i].EncodeRLP(buf); err != nil {
+	outer := buf.List()
+	accounts := buf.List()
+	for i := range e.Accounts {
+		if err := e.Accounts[i].EncodeRLP(buf); err != nil {
 			return err
 		}
 	}
-	buf.ListEnd(l)
+	buf.ListEnd(accounts)
+
+	acctBM := make([]byte, bitmapLen(len(e.Accounts)))
+	for i := range e.Accounts {
+		if _, ok := e.EmptyAccounts[e.Accounts[i].Address]; ok {
+			setBit(acctBM, i)
+		}
+	}
+	slotBM := make([]byte, bitmapLen(e.slotCount()))
+	e.walkSlots(func(pos int, addr common.Address, slot common.Hash) {
+		if _, ok := e.EmptySlots[addr][slot]; ok {
+			setBit(slotBM, pos)
+		}
+	})
+	buf.WriteBytes(acctBM)
+	buf.WriteBytes(slotBM)
+	buf.ListEnd(outer)
 	return buf.Flush()
 }
 
-// DecodeRLP implements rlp.Decoder.
+// DecodeRLP implements rlp.Decoder. The emptiness maps are rebuilt from the
+// bitmaps; a size mismatch means the bitmaps don't describe the account list.
 func (e *BlockAccessList) DecodeRLP(s *rlp.Stream) error {
-	if _, err := s.List(); err != nil {
+	var dec BlockAccessList
+	if _, err := s.List(); err != nil { // outer
 		return err
 	}
-	var list BlockAccessList
+	if _, err := s.List(); err != nil { // accounts
+		return err
+	}
 	for s.MoreDataInList() {
 		var a AccountAccess
 		if err := a.DecodeRLP(s); err != nil {
 			return err
 		}
-		list = append(list, a)
+		dec.Accounts = append(dec.Accounts, a)
 	}
 	if err := s.ListEnd(); err != nil {
 		return err
 	}
-	*e = list
+	acctBM, err := s.Bytes()
+	if err != nil {
+		return err
+	}
+	slotBM, err := s.Bytes()
+	if err != nil {
+		return err
+	}
+	if err := s.ListEnd(); err != nil { // outer
+		return err
+	}
+
+	if want := bitmapLen(len(dec.Accounts)); len(acctBM) != want {
+		return fmt.Errorf("account emptiness bitmap size mismatch: got %d bytes, want %d for %d accounts", len(acctBM), want, len(dec.Accounts))
+	}
+	if want := bitmapLen(dec.slotCount()); len(slotBM) != want {
+		return fmt.Errorf("slot emptiness bitmap size mismatch: got %d bytes, want %d for %d slots", len(slotBM), want, dec.slotCount())
+	}
+	for i := range dec.Accounts {
+		if getBit(acctBM, i) {
+			if dec.EmptyAccounts == nil {
+				dec.EmptyAccounts = make(map[common.Address]struct{})
+			}
+			dec.EmptyAccounts[dec.Accounts[i].Address] = struct{}{}
+		}
+	}
+	dec.walkSlots(func(pos int, addr common.Address, slot common.Hash) {
+		if !getBit(slotBM, pos) {
+			return
+		}
+		if dec.EmptySlots == nil {
+			dec.EmptySlots = make(map[common.Address]map[common.Hash]struct{})
+		}
+		if dec.EmptySlots[addr] == nil {
+			dec.EmptySlots[addr] = make(map[common.Hash]struct{})
+		}
+		dec.EmptySlots[addr][slot] = struct{}{}
+	})
+	*e = dec
 	return nil
 }
 
@@ -80,12 +182,12 @@ func (e *BlockAccessList) DecodeRLP(s *rlp.Stream) error {
 // according to the spec or any code changes are contained which exceed protocol
 // max code size.
 func (e *BlockAccessList) Validate(blockGasLimit uint64, blockTxCount int) error {
-	if !slices.IsSortedFunc(*e, func(a, b AccountAccess) int {
+	if !slices.IsSortedFunc(e.Accounts, func(a, b AccountAccess) int {
 		return bytes.Compare(a.Address[:], b.Address[:])
 	}) {
 		return errors.New("block access list accounts not in lexicographic order")
 	}
-	for _, entry := range *e {
+	for _, entry := range e.Accounts {
 		if err := entry.validate(blockTxCount + 1); err != nil {
 			return err
 		}
@@ -98,9 +200,9 @@ func (e *BlockAccessList) Validate(blockGasLimit uint64, blockTxCount int) error
 // reads) carried by those accounts. A storage slot is counted once regardless
 // of how many transactions wrote to it.
 func (e *BlockAccessList) itemCount() uint64 {
-	count := uint64(len(*e)) // distinct addresses
-	for i := range *e {
-		count += uint64(len((*e)[i].StorageChanges)) + uint64(len((*e)[i].StorageReads))
+	count := uint64(len(e.Accounts)) // distinct addresses
+	for i := range e.Accounts {
+		count += uint64(len(e.Accounts[i].StorageChanges)) + uint64(len(e.Accounts[i].StorageReads))
 	}
 	return count
 }
@@ -464,9 +566,17 @@ func (b *ConstructionBlockAccessList) ToEncodingObj() *BlockAccessList {
 	}
 	slices.SortFunc(addresses, common.Address.Cmp)
 
-	res := make(BlockAccessList, 0, len(addresses))
+	res := BlockAccessList{Accounts: make([]AccountAccess, 0, len(addresses))}
 	for _, addr := range addresses {
-		res = append(res, b.Accounts[addr].toEncodingObj(addr))
+		res.Accounts = append(res.Accounts, b.Accounts[addr].toEncodingObj(addr))
+	}
+	// Referenced, not copied; the construction list is not reused after encoding.
+	// Normalized empty->nil so encode/decode round-trips compare equal.
+	if len(b.EmptyAccounts) > 0 {
+		res.EmptyAccounts = b.EmptyAccounts
+	}
+	if len(b.EmptySlots) > 0 {
+		res.EmptySlots = b.EmptySlots
 	}
 	return &res
 }
@@ -476,7 +586,7 @@ func (e *BlockAccessList) PrettyPrint() string {
 	printWithIndent := func(indent int, text string) {
 		fmt.Fprintf(&res, "%s%s\n", strings.Repeat("    ", indent), text)
 	}
-	for _, accountDiff := range *e {
+	for _, accountDiff := range e.Accounts {
 		printWithIndent(0, fmt.Sprintf("%x:", accountDiff.Address))
 		printWithIndent(1, "storage changes:")
 		for _, slot := range accountDiff.StorageChanges {
@@ -507,9 +617,18 @@ func (e *BlockAccessList) PrettyPrint() string {
 
 // Copy returns a deep copy of the access list
 func (e *BlockAccessList) Copy() *BlockAccessList {
-	cpy := make(BlockAccessList, 0, len(*e))
-	for _, accountAccess := range *e {
-		cpy = append(cpy, accountAccess.Copy())
+	cpy := BlockAccessList{Accounts: make([]AccountAccess, 0, len(e.Accounts))}
+	for _, accountAccess := range e.Accounts {
+		cpy.Accounts = append(cpy.Accounts, accountAccess.Copy())
+	}
+	if e.EmptyAccounts != nil {
+		cpy.EmptyAccounts = maps.Clone(e.EmptyAccounts)
+	}
+	if e.EmptySlots != nil {
+		cpy.EmptySlots = make(map[common.Address]map[common.Hash]struct{}, len(e.EmptySlots))
+		for addr, slots := range e.EmptySlots {
+			cpy.EmptySlots[addr] = maps.Clone(slots)
+		}
 	}
 	return &cpy
 }

@@ -144,7 +144,7 @@ func TestWithBALConstructConsumeVerify(t *testing.T) {
 		if err != nil {
 			t.Fatalf("recompute BAL for #%d: %v", b.NumberU64(), err)
 		}
-		if len(*al) == 0 {
+		if len(al.Accounts) == 0 {
 			t.Fatalf("recomputed BAL for #%d is empty — WithBAL not constructing", b.NumberU64())
 		}
 		bals[i] = al

@@ -69,12 +69,20 @@ func NewConstructionAccountAccess() *ConstructionAccountAccess {
 // in execution (account addresses and storage keys).
 type ConstructionBlockAccessList struct {
 	Accounts map[common.Address]*ConstructionAccountAccess
+
+	// Block-start emptiness, recorded during execution: accounts that were
+	// non-existent, and accessed slots that were zero, at the block-start
+	// pre-state. One fact per key, independent of later writes in the block.
+	EmptyAccounts map[common.Address]struct{}
+	EmptySlots    map[common.Address]map[common.Hash]struct{}
 }
 
 // NewConstructionBlockAccessList instantiates an empty access list.
 func NewConstructionBlockAccessList() *ConstructionBlockAccessList {
 	return &ConstructionBlockAccessList{
-		Accounts: make(map[common.Address]*ConstructionAccountAccess),
+		Accounts:      make(map[common.Address]*ConstructionAccountAccess),
+		EmptyAccounts: make(map[common.Address]struct{}),
+		EmptySlots:    make(map[common.Address]map[common.Hash]struct{}),
 	}
 }
 
@@ -83,6 +91,20 @@ func (b *ConstructionBlockAccessList) AccountRead(addr common.Address) {
 	if _, ok := b.Accounts[addr]; !ok {
 		b.Accounts[addr] = NewConstructionAccountAccess()
 	}
+}
+
+// AccountEmpty records that an account was empty (non-existent) at block start.
+func (b *ConstructionBlockAccessList) AccountEmpty(addr common.Address) {
+	b.EmptyAccounts[addr] = struct{}{}
+}
+
+// SlotEmpty records that a storage slot was zero at block start, observed once per
+// slot at the block-start reader read, regardless of any later write.
+func (b *ConstructionBlockAccessList) SlotEmpty(address common.Address, key common.Hash) {
+	if b.EmptySlots[address] == nil {
+		b.EmptySlots[address] = make(map[common.Hash]struct{})
+	}
+	b.EmptySlots[address][key] = struct{}{}
 }
 
 // StorageRead records a storage key read during execution.
@@ -193,6 +215,20 @@ func (b *ConstructionBlockAccessList) Merge(other *ConstructionBlockAccessList) 
 			acc.CodeChange[txIdx] = code
 		}
 	}
+	// Union the emptiness sets; both observe the same block-start pre-state,
+	// so they can never conflict.
+	for addr := range other.EmptyAccounts {
+		b.EmptyAccounts[addr] = struct{}{}
+	}
+	for addr, slots := range other.EmptySlots {
+		if b.EmptySlots[addr] == nil {
+			b.EmptySlots[addr] = slots
+			continue
+		}
+		for key := range slots {
+			b.EmptySlots[addr][key] = struct{}{}
+		}
+	}
 }
 
 // Copy returns a deep copy of the access list.
@@ -221,6 +257,10 @@ func (b *ConstructionBlockAccessList) Copy() *ConstructionBlockAccessList {
 		}
 		aaCopy.CodeChange = codes
 		res.Accounts[addr] = &aaCopy
+	}
+	res.EmptyAccounts = maps.Clone(b.EmptyAccounts)
+	for addr, slots := range b.EmptySlots {
+		res.EmptySlots[addr] = maps.Clone(slots)
 	}
 	return res
 }
@@ -322,8 +362,8 @@ type WrittenCounts struct {
 // WrittenCounts walks the BAL once and returns the aggregate write counts.
 func (e BlockAccessList) WrittenCounts() WrittenCounts {
 	var w WrittenCounts
-	for i := range e {
-		a := &e[i]
+	for i := range e.Accounts {
+		a := &e.Accounts[i]
 		if len(a.StorageChanges) > 0 || len(a.BalanceChanges) > 0 ||
 			len(a.NonceChanges) > 0 || len(a.CodeChanges) > 0 {
 			w.Accounts++

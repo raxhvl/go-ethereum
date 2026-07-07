@@ -24,9 +24,9 @@ type preparedSlot struct {
 
 // NewAccessListReader instantiates an access list reader.
 func NewAccessListReader(list BlockAccessList) *AccessListReader {
-	accounts := make(map[common.Address]*preparedAccount, len(list))
-	for i := range list {
-		a := list[i] // index; do not range-copy the AccountAccess
+	accounts := make(map[common.Address]*preparedAccount, len(list.Accounts))
+	for i := range list.Accounts {
+		a := list.Accounts[i] // index; do not range-copy the AccountAccess
 		pa := &preparedAccount{
 			AccountAccess: a,
 		}
