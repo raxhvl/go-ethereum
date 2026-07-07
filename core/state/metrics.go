@@ -37,4 +37,9 @@ var (
 	accountReadExistTimer = metrics.NewRegisteredResettingTimer("state/read/account/exist/duration", nil)
 	storageReadEmptyTimer = metrics.NewRegisteredResettingTimer("state/read/storage/empty/duration", nil)
 	storageReadExistTimer = metrics.NewRegisteredResettingTimer("state/read/storage/exist/duration", nil)
+
+	// Pre-state reads answered by the block access list's emptiness bits
+	// instead of the database.
+	balSkipAccountMeter = metrics.NewRegisteredMeter("chain/bal/skip/account", nil)
+	balSkipSlotMeter    = metrics.NewRegisteredMeter("chain/bal/skip/slot", nil)
 )

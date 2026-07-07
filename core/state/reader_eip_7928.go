@@ -64,6 +64,50 @@ import (
 	"github.com/ethereum/go-ethereum/core/types/bal"
 )
 
+// emptySkipReader answers pre-state reads for items the block access list
+// flags as empty at block start, without consulting the underlying reader.
+//
+// It must sit below every consumer of pre-state — the per-transaction
+// execution readers, the plain statedb used for system calls, and the prefetch
+// workers — and above the database, so a flagged read never reaches disk
+// regardless of which path issued it. It must also stay below the statedb
+// recording sites: statedb re-observes the served emptiness and re-records it,
+// so a wrong bit surfaces as a provided-vs-computed access list hash mismatch.
+type emptySkipReader struct {
+	base  StateReader
+	empty *bal.AccessListReader
+}
+
+// newEmptySkipReader wraps base with the emptiness bits of the given access
+// list. The base is returned unchanged when the list carries no emptiness
+// information, so blocks without empty items pay nothing.
+func newEmptySkipReader(base StateReader, empty *bal.AccessListReader) StateReader {
+	if !empty.HasEmptiness() {
+		return base
+	}
+	return &emptySkipReader{base: base, empty: empty}
+}
+
+// Account implements StateReader, resolving flagged-empty accounts to
+// non-existent without a base read.
+func (r *emptySkipReader) Account(addr common.Address) (*types.StateAccount, error) {
+	if r.empty.EmptyAccount(addr) {
+		balSkipAccountMeter.Mark(1)
+		return nil, nil
+	}
+	return r.base.Account(addr)
+}
+
+// Storage implements StateReader, resolving flagged-empty slots to zero
+// without a base read.
+func (r *emptySkipReader) Storage(addr common.Address, slot common.Hash) (common.Hash, error) {
+	if r.empty.EmptySlot(addr, slot) {
+		balSkipSlotMeter.Mark(1)
+		return common.Hash{}, nil
+	}
+	return r.base.Storage(addr, slot)
+}
+
 type fetchTask struct {
 	addr  common.Address
 	slots []common.Hash

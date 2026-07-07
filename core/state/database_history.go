@@ -23,6 +23,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/types/bal"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
@@ -223,7 +224,7 @@ type HistoricDB struct {
 	codedb *CodeDB
 }
 
-func (db *HistoricDB) ReaderWithPrefetch(stateRoot common.Hash, accessList map[common.Address][]common.Hash, threads int, block bool) (Reader, error) {
+func (db *HistoricDB) ReaderWithPrefetch(stateRoot common.Hash, prepared *bal.AccessListReader, includeReads bool, threads int, block bool) (Reader, error) {
 	panic("not implemented")
 }
 

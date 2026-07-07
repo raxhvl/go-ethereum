@@ -19,6 +19,7 @@ package state
 import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/types/bal"
 	"github.com/ethereum/go-ethereum/trie/bintrie"
 	"github.com/ethereum/go-ethereum/triedb"
 )
@@ -96,7 +97,7 @@ func (db *UBTDatabase) Reader(stateRoot common.Hash) (Reader, error) {
 	return newReader(db.codedb.Reader(), sr), nil
 }
 
-func (db *UBTDatabase) ReaderWithPrefetch(stateRoot common.Hash, accessList map[common.Address][]common.Hash, threads int, block bool) (Reader, error) {
+func (db *UBTDatabase) ReaderWithPrefetch(stateRoot common.Hash, prepared *bal.AccessListReader, includeReads bool, threads int, block bool) (Reader, error) {
 	panic("not implemented")
 }
 

@@ -11,6 +11,11 @@ import (
 // list during block execution.
 type AccessListReader struct {
 	accounts map[common.Address]*preparedAccount
+
+	// Items flagged empty at the block-start pre-state. Borrowed from the
+	// decoded access list; read-only.
+	emptyAccounts map[common.Address]struct{}
+	emptySlots    map[common.Address]map[common.Hash]struct{}
 }
 
 type preparedAccount struct {
@@ -39,7 +44,31 @@ func NewAccessListReader(list BlockAccessList) *AccessListReader {
 		}
 		accounts[a.Address] = pa
 	}
-	return &AccessListReader{accounts: accounts}
+	return &AccessListReader{
+		accounts:      accounts,
+		emptyAccounts: list.EmptyAccounts,
+		emptySlots:    list.EmptySlots,
+	}
+}
+
+// EmptyAccount reports whether the access list flags the account as empty at
+// the block-start pre-state.
+func (p *AccessListReader) EmptyAccount(addr common.Address) bool {
+	_, ok := p.emptyAccounts[addr]
+	return ok
+}
+
+// EmptySlot reports whether the access list flags the storage slot as zero at
+// the block-start pre-state.
+func (p *AccessListReader) EmptySlot(addr common.Address, slot common.Hash) bool {
+	_, ok := p.emptySlots[addr][slot]
+	return ok
+}
+
+// HasEmptiness reports whether the access list carries any block-start
+// emptiness information.
+func (p *AccessListReader) HasEmptiness() bool {
+	return len(p.emptyAccounts) > 0 || len(p.emptySlots) > 0
 }
 
 // lastBefore returns the position of the last element in a slice of n elements

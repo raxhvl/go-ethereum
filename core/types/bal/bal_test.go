@@ -534,3 +534,63 @@ func TestBlockAccessListValidation(t *testing.T) {
 		t.Fatalf("Unexpected validation error: %v", err)
 	}
 }
+
+// TestConstructionBALEmptinessMergeCopy checks the emptiness sets across
+// Merge and Copy: Merge unions overlapping and disjoint items, and Copy is
+// deep — mutating the origin leaves the copy untouched.
+func TestConstructionBALEmptinessMergeCopy(t *testing.T) {
+	var (
+		addr1 = common.Address{0x01}
+		addr2 = common.Address{0x02}
+		addr3 = common.Address{0x03}
+		slotA = common.Hash{0xaa}
+		slotB = common.Hash{0xbb}
+		slotC = common.Hash{0xcc}
+	)
+	a := NewConstructionBlockAccessList()
+	a.AccountEmpty(addr1)
+	a.SlotEmpty(addr1, slotA)
+
+	b := NewConstructionBlockAccessList()
+	b.AccountEmpty(addr1)     // overlapping account
+	b.AccountEmpty(addr2)     // disjoint account
+	b.SlotEmpty(addr1, slotB) // extends an existing slot set
+	b.SlotEmpty(addr2, slotA) // fresh slot set
+
+	a.Merge(b)
+	for _, addr := range []common.Address{addr1, addr2} {
+		if _, ok := a.EmptyAccounts[addr]; !ok {
+			t.Fatalf("merged list missing empty account %x", addr)
+		}
+	}
+	if len(a.EmptyAccounts) != 2 {
+		t.Fatalf("merged empty accounts: want 2, got %d", len(a.EmptyAccounts))
+	}
+	for addr, slots := range map[common.Address][]common.Hash{
+		addr1: {slotA, slotB},
+		addr2: {slotA},
+	} {
+		if len(a.EmptySlots[addr]) != len(slots) {
+			t.Fatalf("merged empty slots for %x: want %d, got %d", addr, len(slots), len(a.EmptySlots[addr]))
+		}
+		for _, slot := range slots {
+			if _, ok := a.EmptySlots[addr][slot]; !ok {
+				t.Fatalf("merged list missing empty slot %x/%x", addr, slot)
+			}
+		}
+	}
+
+	cp := a.Copy()
+	a.AccountEmpty(addr3)
+	a.SlotEmpty(addr1, slotC)
+	a.SlotEmpty(addr3, slotA)
+	if len(cp.EmptyAccounts) != 2 {
+		t.Fatalf("copy empty accounts changed after origin mutation: want 2, got %d", len(cp.EmptyAccounts))
+	}
+	if len(cp.EmptySlots[addr1]) != 2 {
+		t.Fatalf("copy empty slots changed after origin mutation: want 2, got %d", len(cp.EmptySlots[addr1]))
+	}
+	if _, ok := cp.EmptySlots[addr3]; ok {
+		t.Fatal("copy gained an empty-slot set from origin mutation")
+	}
+}

@@ -22,6 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/types/bal"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/trie/bintrie"
@@ -54,9 +55,12 @@ type Database interface {
 	// Reader returns a state reader associated with the specified state root.
 	Reader(root common.Hash) (Reader, error)
 
-	// ReaderWithPrefetch returns a reader which asynchronously fetches block
-	// access list state in the background.
-	ReaderWithPrefetch(stateRoot common.Hash, accessList map[common.Address][]common.Hash, threads int, block bool) (Reader, error)
+	// ReaderWithPrefetch returns a reader which asynchronously fetches the
+	// state hinted by the prepared access list in the background; includeReads
+	// extends the prefetch set with the un-mutated items. Items the access
+	// list flags as empty at block start are served without touching the
+	// database.
+	ReaderWithPrefetch(stateRoot common.Hash, prepared *bal.AccessListReader, includeReads bool, threads int, block bool) (Reader, error)
 
 	// Iteratee returns a state iteratee associated with the specified state root,
 	// through which the account iterator and storage iterator can be created.

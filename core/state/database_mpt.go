@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state/snapshot"
+	"github.com/ethereum/go-ethereum/core/types/bal"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/trie"
@@ -186,7 +187,7 @@ func (db *MPTDatabase) Iteratee(root common.Hash) (Iteratee, error) {
 	return newStateIteratee(true, root, db.triedb, db.snap)
 }
 
-func (db *MPTDatabase) ReaderWithPrefetch(stateRoot common.Hash, accessList map[common.Address][]common.Hash, threads int, block bool) (Reader, error) {
+func (db *MPTDatabase) ReaderWithPrefetch(stateRoot common.Hash, prepared *bal.AccessListReader, includeReads bool, threads int, block bool) (Reader, error) {
 	base, err := db.StateReader(stateRoot)
 	if err != nil {
 		return nil, err
@@ -194,8 +195,12 @@ func (db *MPTDatabase) ReaderWithPrefetch(stateRoot common.Hash, accessList map[
 	// Construct the state reader with native cache and associated statistics
 	r := newStateReaderWithStats(newStateReaderWithCache(base))
 
+	// Serve reads flagged empty by the access list before they reach the
+	// database. Installed below the prefetcher so its workers skip them too.
+	sr := newEmptySkipReader(r, prepared)
+
 	// Construct the state reader with background prefetching
-	pr := newPrefetchStateReader(r, accessList, threads)
+	pr := newPrefetchStateReader(sr, prepared.StorageKeys(includeReads), threads)
 	if block {
 		if err := pr.Wait(); err != nil {
 			panic("this should unreachable")
