@@ -59,7 +59,14 @@ func (bc *BlockChain) RecomputeAccessList(block *types.Block) (*bal.BlockAccessL
 	if parent == nil {
 		return nil, fmt.Errorf("parent header %x not found for block #%d", block.ParentHash(), block.NumberU64())
 	}
+	// StateAt only serves live layers (disk layer + journaled diffs). For
+	// parents below the disk layer, fall back to the indexed state history,
+	// mirroring how the RPC backend resolves old states. Requires archive
+	// mode (--gcmode archive) and a fully indexed state history.
 	statedb, err := bc.StateAt(parent)
+	if err != nil {
+		statedb, err = bc.HistoricState(parent)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("state at parent #%d (%x): %w", parent.Number.Uint64(), parent.Root, err)
 	}
