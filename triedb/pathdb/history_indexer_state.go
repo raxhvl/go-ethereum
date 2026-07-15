@@ -52,7 +52,11 @@ const (
 	//
 	// If the local chain head falls within this threshold, the node is considered
 	// close to the tip and will be marked as stateSynced.
-	syncStateTimeWindow = 6 * time.Hour
+	//
+	// Lab: widened from 6h — the replay bed boots frozen snapshots whose head
+	// is stale by design, and the default made every boot wait out the 5m
+	// stall detector before serving the history index.
+	syncStateTimeWindow = 90 * 24 * time.Hour
 
 	// syncStalledTimeout defines the maximum duration during which no sync
 	// progress is observed. If this timeout is exceeded, the node's status
