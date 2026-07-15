@@ -29,4 +29,12 @@ var (
 	storageTriesUpdatedMeter = metrics.NewRegisteredMeter("state/update/storagenodes", nil)
 	accountTrieDeletedMeter  = metrics.NewRegisteredMeter("state/delete/accountnodes", nil)
 	storageTriesDeletedMeter = metrics.NewRegisteredMeter("state/delete/storagenodes", nil)
+
+	// Door-to-door read latency split by outcome: an empty result is a read a
+	// BAL empty-skip would delete outright, so its mean is the per-skip saving;
+	// exist is the comparison baseline.
+	accountReadEmptyTimer = metrics.NewRegisteredResettingTimer("state/read/account/empty/duration", nil)
+	accountReadExistTimer = metrics.NewRegisteredResettingTimer("state/read/account/exist/duration", nil)
+	storageReadEmptyTimer = metrics.NewRegisteredResettingTimer("state/read/storage/empty/duration", nil)
+	storageReadExistTimer = metrics.NewRegisteredResettingTimer("state/read/storage/exist/duration", nil)
 )

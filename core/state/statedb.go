@@ -625,12 +625,15 @@ func (s *StateDB) getStateObject(addr common.Address) *stateObject {
 		s.setError(fmt.Errorf("getStateObject (%x) error: %w", addr.Bytes(), err))
 		return nil
 	}
-	s.AccountReads += time.Since(start)
+	elapsed := time.Since(start)
+	s.AccountReads += elapsed
 
 	// Short circuit if the account is not found
 	if acct == nil {
+		accountReadEmptyTimer.Update(elapsed)
 		return nil
 	}
+	accountReadExistTimer.Update(elapsed)
 	// Schedule the resolved account for prefetching if it's enabled.
 	if s.prefetcher != nil {
 		if err = s.prefetcher.prefetch(common.Hash{}, s.originalRoot, common.Address{}, []common.Address{addr}, nil, true); err != nil {

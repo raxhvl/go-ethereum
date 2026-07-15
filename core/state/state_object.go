@@ -234,7 +234,13 @@ func (s *stateObject) GetCommittedState(key common.Hash) common.Hash {
 		s.db.setError(err)
 		return common.Hash{}
 	}
-	s.db.StorageReads += time.Since(start)
+	elapsed := time.Since(start)
+	s.db.StorageReads += elapsed
+	if value == (common.Hash{}) {
+		storageReadEmptyTimer.Update(elapsed)
+	} else {
+		storageReadExistTimer.Update(elapsed)
+	}
 
 	// Schedule the resolved storage slots for prefetching if it's enabled.
 	if s.db.prefetcher != nil && s.data.Root != types.EmptyRootHash {
