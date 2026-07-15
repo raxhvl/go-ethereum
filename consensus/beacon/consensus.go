@@ -355,8 +355,9 @@ func (beacon *Beacon) Finalize(chain consensus.ChainHeaderReader, header *types.
 		amount = amount.Mul(amount, uint256.NewInt(params.GWei))
 		prev := state.AddBalance(w.Address, amount, tracing.BalanceIncreaseWithdrawal)
 
-		// Populate the block-level accessList if Amsterdam is enabled
-		if chain.Config().IsAmsterdam(header.Number, header.Time) {
+		// Populate the block-level accessList if BALs are being constructed
+		// (Amsterdam, or forced via WithBAL).
+		if chain.Config().BALEnabled(header.Number, header.Time) {
 			if w.Amount == 0 {
 				// Zero amount withdrawal, account is accessed potential
 				// without state changes.
