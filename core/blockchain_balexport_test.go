@@ -209,13 +209,23 @@ func TestBALReplayRoundTripAfterRewind(t *testing.T) {
 	// widened staleness window on the replay bed.
 	ts := uint64(time.Now().Add(-time.Hour).Unix())
 
-	// A storage scratchpad: sstore(key=calldata[0:32], value=calldata[32:64]).
-	runtime := []byte{0x60, 0x20, 0x35, 0x60, 0x00, 0x35, 0x55, 0x00}
-	initcode := append(append([]byte{0x67}, runtime...), 0x60, 0x00, 0x52, 0x60, 0x08, 0x60, 0x18, 0xf3)
+	// A storage scratchpad: 64-byte calldata does sstore(key=calldata[0:32],
+	// value=calldata[32:64]); 32-byte calldata does sload(key=calldata[0:32]).
+	runtime := []byte{
+		0x36, 0x60, 0x20, 0x14, 0x60, 0x0f, 0x57, // CALLDATASIZE == 32 → jump to sload
+		0x60, 0x20, 0x35, 0x60, 0x00, 0x35, 0x55, 0x00, // sstore path
+		0x5b, 0x60, 0x00, 0x35, 0x54, 0x50, 0x00, // sload path
+	}
+	initcode := append(append([]byte{0x75}, runtime...), 0x60, 0x00, 0x52, 0x60, 0x16, 0x60, 0x0a, 0xf3)
 	contract := crypto.CreateAddress(env.from, 0)
 	store := func(key, val byte) []byte {
 		data := make([]byte, 64)
 		data[31], data[63] = key, val
+		return data
+	}
+	load := func(key byte) []byte {
+		data := make([]byte, 32)
+		data[31] = key
 		return data
 	}
 	var nonce uint64
@@ -241,6 +251,11 @@ func TestBALReplayRoundTripAfterRewind(t *testing.T) {
 		b.AddTx(tx(&contract, 0, store(byte(i%7+1), byte(i))))
 		if i%5 == 0 {
 			b.AddTx(tx(&contract, 0, store(byte(i%7+1), 0))) // zero it back out
+			// Read the just-zeroed slot from a later tx in the same block: the
+			// sequential pipeline serves this from pending storage while the
+			// parallel one serves it from the access list, and the emptiness
+			// signal must come out identical either way.
+			b.AddTx(tx(&contract, 0, load(byte(i%7+1))))
 		}
 		if i%9 == 0 {
 			b.AddTx(tx(&env.from, 7, nil)) // self transfer touches only existing state
@@ -329,9 +344,11 @@ func TestBALReplayRoundTripAfterRewind(t *testing.T) {
 	}
 	for i := rewind; i < n; i++ {
 		if _, err := bc.InsertChain([]*types.Block{blocks[i].WithAccessListUnsafe(als[i])}); err != nil {
-			for _, acct := range *als[i] {
+			for _, acct := range als[i].Accounts {
 				t.Logf("BAL entry %x: %d balance, %d nonce, %d storage changes", acct.Address, len(acct.BalanceChanges), len(acct.NonceChanges), len(acct.StorageChanges))
 			}
+			t.Logf("empty accounts: %v", als[i].EmptyAccounts)
+			t.Logf("empty slots: %v", als[i].EmptySlots)
 			t.Fatalf("consume after rewind failed at #%d (%d txs, %d withdrawals): %v",
 				blocks[i].NumberU64(), len(blocks[i].Transactions()), len(blocks[i].Withdrawals()), err)
 		}

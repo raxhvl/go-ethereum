@@ -70,9 +70,10 @@ func NewConstructionAccountAccess() *ConstructionAccountAccess {
 type ConstructionBlockAccessList struct {
 	Accounts map[common.Address]*ConstructionAccountAccess
 
-	// Block-start emptiness, recorded during execution: accounts that were
-	// non-existent, and accessed slots that were zero, at the block-start
-	// pre-state. One fact per key, independent of later writes in the block.
+	// Block-start emptiness, derived after execution from the touched set and
+	// the block-start pre-state (state.MarkBlockStartEmptiness): accounts that
+	// were non-existent, and touched slots that were zero, before the block.
+	// One fact per key, independent of later writes in the block.
 	EmptyAccounts map[common.Address]struct{}
 	EmptySlots    map[common.Address]map[common.Hash]struct{}
 }
@@ -98,8 +99,7 @@ func (b *ConstructionBlockAccessList) AccountEmpty(addr common.Address) {
 	b.EmptyAccounts[addr] = struct{}{}
 }
 
-// SlotEmpty records that a storage slot was zero at block start, observed once per
-// slot at the block-start reader read, regardless of any later write.
+// SlotEmpty records that a storage slot was zero at block start.
 func (b *ConstructionBlockAccessList) SlotEmpty(address common.Address, key common.Hash) {
 	if b.EmptySlots[address] == nil {
 		b.EmptySlots[address] = make(map[common.Hash]struct{})
@@ -215,7 +215,7 @@ func (b *ConstructionBlockAccessList) Merge(other *ConstructionBlockAccessList) 
 			acc.CodeChange[txIdx] = code
 		}
 	}
-	// Union the emptiness sets; both observe the same block-start pre-state,
+	// Union the emptiness sets; both describe the same block-start pre-state,
 	// so they can never conflict.
 	for addr := range other.EmptyAccounts {
 		b.EmptyAccounts[addr] = struct{}{}

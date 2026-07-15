@@ -128,6 +128,13 @@ func (p *StateProcessor) Process(ctx context.Context, block *types.Block, stated
 	// TODO(rjl493456442) integrate it into the PostExecution.
 	p.chain.Engine().Finalize(p.chain, header, tracingStateDB, block.Body(), uint32(len(block.Transactions())+1), blockAccessList)
 
+	// Derive the block-start emptiness bits from the completed access list.
+	if config.BALEnabled(block.Number(), block.Time()) {
+		if err := state.MarkBlockStartEmptiness(blockAccessList, statedb.Reader()); err != nil {
+			return nil, err
+		}
+	}
+
 	return &ProcessResult{
 		Receipts: receipts,
 		Requests: requests,

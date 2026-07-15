@@ -423,6 +423,13 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, engine conse
 		// Apply the consensus-specific post-transaction changes
 		b.engine.Finalize(cm, b.header, statedb, &body, uint32(len(b.txs)+1), b.bal)
 
+		// Derive the block-start emptiness bits from the completed access list.
+		if b.bal != nil {
+			if err := state.MarkBlockStartEmptiness(b.bal, statedb.Reader()); err != nil {
+				panic(fmt.Sprintf("failed to mark block-start emptiness: %v", err))
+			}
+		}
+
 		// Assemble the block for delivery.
 		block := AssembleBlock(cm, b.header, statedb, &body, b.receipts, b.bal)
 

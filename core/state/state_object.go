@@ -242,12 +242,6 @@ func (s *stateObject) GetCommittedState(key common.Hash) common.Hash {
 		storageReadExistTimer.Update(elapsed)
 	}
 
-	// This reader read hits block-start committed state, so a zero value means the
-	// slot was empty at block start; record it for the BAL emptiness signal.
-	if value == (common.Hash{}) && s.db.stateAccessList != nil {
-		s.db.stateAccessList.SlotEmpty(s.address, key)
-	}
-
 	// Schedule the resolved storage slots for prefetching if it's enabled.
 	if s.db.prefetcher != nil && s.data.Root != types.EmptyRootHash {
 		if err = s.db.prefetcher.prefetch(s.addrHash(), s.origin.Root, s.address, nil, []common.Hash{key}, true); err != nil {

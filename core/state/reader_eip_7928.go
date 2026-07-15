@@ -54,6 +54,8 @@ package state
 //                    └─────────────────────────────┘
 
 import (
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -70,9 +72,10 @@ import (
 // It must sit below every consumer of pre-state — the per-transaction
 // execution readers, the plain statedb used for system calls, and the prefetch
 // workers — and above the database, so a flagged read never reaches disk
-// regardless of which path issued it. It must also stay below the statedb
-// recording sites: statedb re-observes the served emptiness and re-records it,
-// so a wrong bit surfaces as a provided-vs-computed access list hash mismatch.
+// regardless of which path issued it. Verification does not depend on it: the
+// emptiness bits are re-derived from the block-start state by
+// MarkBlockStartEmptiness, so a wrong bit surfaces as a provided-vs-computed
+// access list hash mismatch.
 type emptySkipReader struct {
 	base  StateReader
 	empty *bal.AccessListReader
@@ -354,4 +357,42 @@ func (r *ReaderWithBlockLevelAccessList) CodeSize(addr common.Address, codeHash 
 		return len(code)
 	}
 	return r.Reader.CodeSize(addr, codeHash)
+}
+
+// MarkBlockStartEmptiness derives the access list's emptiness bits: every
+// touched account that is absent from the block-start state, and every touched
+// slot that is zero there, gets flagged. Deriving the bits from the touched
+// set and the parent state alone keeps sequential and parallel construction in
+// exact agreement — execution order and read-serving paths cannot influence
+// the result. The parent reader must be a plain block-start reader, not the
+// consume stack: its emptiness-serving layer would echo the attached list
+// back into verification.
+func MarkBlockStartEmptiness(list *bal.ConstructionBlockAccessList, parent Reader) error {
+	for addr, access := range list.Accounts {
+		account, err := parent.Account(addr)
+		if err != nil {
+			return err
+		}
+		if account == nil {
+			list.AccountEmpty(addr)
+		}
+		// Reads and writes are disjoint by construction, so this visits each
+		// touched slot once.
+		slots := slices.Collect(maps.Keys(access.StorageReads))
+		slots = slices.AppendSeq(slots, maps.Keys(access.StorageWrites))
+		for _, slot := range slots {
+			if account == nil {
+				list.SlotEmpty(addr, slot) // an absent account holds no storage
+				continue
+			}
+			value, err := parent.Storage(addr, slot)
+			if err != nil {
+				return err
+			}
+			if value == (common.Hash{}) {
+				list.SlotEmpty(addr, slot)
+			}
+		}
+	}
+	return nil
 }

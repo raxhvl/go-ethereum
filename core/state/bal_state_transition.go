@@ -115,6 +115,13 @@ func (s *BALStateTransition) WrittenCounts() bal.WrittenCounts {
 	return s.written
 }
 
+// ParentReader opens a plain reader over the block-start state, bypassing the
+// consume-path reader stack (whose emptiness-serving layer would echo the
+// attached access list back into verification).
+func (s *BALStateTransition) ParentReader() (Reader, error) {
+	return s.db.Reader(s.parentRoot)
+}
+
 // PreparedAccessList returns the shared, read-only preprocessed access list for
 // the block. It is built once per block and reused by the parallel execution
 // readers so the preprocessing is not repeated per transaction.
