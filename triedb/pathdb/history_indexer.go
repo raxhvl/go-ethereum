@@ -386,6 +386,14 @@ func newIndexIniter(disk ethdb.Database, freezer ethdb.AncientStore, typ history
 		initer.indexed.Store(metadata.Last)
 		recover = metadata.Last > lastID
 	}
+	// A complete index is servable as-is: mark it ready synchronously, so
+	// short-lived processes (export/import) can't race the background
+	// readiness checks. New histories still index synchronously via extend.
+	if metadata != nil && metadata.Last == lastID {
+		initer.log.Info("History index is complete, serving immediately", "last", lastID)
+		close(initer.done)
+		return initer
+	}
 
 	// Launch background indexer
 	initer.wg.Add(1)

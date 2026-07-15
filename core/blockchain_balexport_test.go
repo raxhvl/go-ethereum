@@ -220,7 +220,9 @@ func TestBALReplayRoundTripAfterRewind(t *testing.T) {
 	}
 	var nonce uint64
 	tx := func(to *common.Address, value int64, data []byte) *types.Transaction {
-		signed := env.tx(nonce, to, big.NewInt(value), 500_000, 0, data)
+		// Non-zero tip so the coinbase collects a balance change per tx,
+		// like a mainnet fee recipient does.
+		signed := env.tx(nonce, to, big.NewInt(value), 500_000, 1, data)
 		nonce++
 		return signed
 	}
@@ -243,10 +245,22 @@ func TestBALReplayRoundTripAfterRewind(t *testing.T) {
 		if i%9 == 0 {
 			b.AddTx(tx(&env.from, 7, nil)) // self transfer touches only existing state
 		}
-		// Withdrawals: one to a fresh account, one to the tx sender, so a
-		// block-level credit lands on an account transactions also touched.
-		b.AddWithdrawal(&types.Withdrawal{Address: common.BigToAddress(big.NewInt(int64(0xaa00 + i))), Amount: 100})
+		if i == 20 {
+			b.AddTx(tx(nil, 0, initcode)) // a deployment inside the replayed range
+		}
+		// Withdrawals: one to a fresh account, one to the tx sender (a
+		// block-level credit on an account transactions also touched), plus a
+		// second credit to the fresh account every fourth block (accumulation)
+		// and a zero-amount one (access recorded without a balance change).
+		fresh := common.BigToAddress(big.NewInt(int64(0xaa00 + i)))
+		b.AddWithdrawal(&types.Withdrawal{Address: fresh, Amount: 100})
 		b.AddWithdrawal(&types.Withdrawal{Address: env.from, Amount: 50})
+		if i%4 == 0 {
+			b.AddWithdrawal(&types.Withdrawal{Address: fresh, Amount: 25})
+		}
+		if i%6 == 0 {
+			b.AddWithdrawal(&types.Withdrawal{Address: common.BigToAddress(big.NewInt(int64(0xbb00 + i))), Amount: 0})
+		}
 	})
 
 	disk, err := rawdb.Open(rawdb.NewMemoryDatabase(), rawdb.OpenOptions{Ancient: t.TempDir()})

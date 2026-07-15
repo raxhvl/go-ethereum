@@ -55,3 +55,35 @@ func TestHistoryIndexerShortenDeadlock(t *testing.T) {
 		t.Fatal("timed out waiting for shorten to complete, potential deadlock")
 	}
 }
+
+// TestHistoryIndexReadyOnReopen asserts that a database reopened with a fully
+// built history index serves historical state immediately. Regression test for
+// a readiness race: the initer's first heartbeat could observe the sync-state
+// probe's default "syncing" answer and back off, leaving a complete index
+// unservable long enough to kill a short-lived process (export/import) that
+// reads historical state right after startup.
+func TestHistoryIndexReadyOnReopen(t *testing.T) {
+	maxDiffLayers = 4
+	defer func() {
+		maxDiffLayers = 128
+	}()
+
+	env := newTester(t, &testerConfig{layers: 12, enableIndex: true})
+	defer env.release()
+	waitIndexing(env.db)
+
+	if err := env.db.Journal(env.lastHash()); err != nil {
+		t.Fatalf("Failed to journal: %v", err)
+	}
+	env.db.Close()
+
+	// Reopen the way a production process does: indexing enabled, without the
+	// test-only readiness bypass.
+	config := *env.db.config
+	config.NoHistoryIndexDelay = false
+	env.db = New(env.db.diskdb, &config, false)
+
+	if !env.db.stateIndexer.inited() {
+		t.Fatal("fully indexed history is not servable immediately after reopen")
+	}
+}
