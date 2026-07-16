@@ -2226,7 +2226,9 @@ func (bc *BlockChain) processBlockWithAccessList(parentRoot common.Hash, block *
 	stats.CodeUpdated = wc.Codes
 	stats.CodeUpdateBytes = wc.CodeBytes
 
-	//stats.ExecWall = res.ExecTime
+	// Unlike the serial path (execution minus state reads), the parallel BAL
+	// executor reports ExecTime for the whole execution phase, reads included.
+	stats.Execution = res.ExecTime
 	//stats.PostProcess = res.PostProcessTime
 
 	if m := res.StateTransitionMetrics; m != nil {
